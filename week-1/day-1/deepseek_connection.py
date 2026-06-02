@@ -1,12 +1,9 @@
 import os
-from dotenv import load_dotenv
 from openai import OpenAI
 
-load_dotenv()
-
-api_key = os.environ.get("DEEPSEEK_API_KEY")
+api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN")
 if not api_key:
-    raise RuntimeError("DEEPSEEK_API_KEY не найден — проверьте .env или экспорт переменной")
+    raise RuntimeError("ANTHROPIC_AUTH_TOKEN не найден — проверьте экспорт переменной")
 
 client = OpenAI(
     api_key=api_key,
