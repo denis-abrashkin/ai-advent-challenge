@@ -17,7 +17,7 @@
 import os
 import textwrap
 import time
-from openai import OpenAI
+from openai import APIError, OpenAI
 
 # ── Настройка ──────────────────────────────────────────────────────────────────
 
@@ -117,7 +117,7 @@ def ask(messages, **kwargs):
 # ── Вспомогательные структуры ──────────────────────────────────────────────────
 
 
-def make_result(title, method_key, params, text, finish, duration,
+def make_result(title, method_key, params, text, finish, duration, *,
                 steps=1, intermediate=None):
     """Создаёт стандартизированный словарь результата."""
     return {
@@ -610,23 +610,8 @@ def print_ground_truth():
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 
-def main():
-    """Запускает все четыре метода, сравнивает и выводит результаты."""
-    print()
-    print_separator("=")
-    print("  День 3: Разные способы рассуждения")
-    print("  Missing Dollar Riddle — 4 способа, 1 задача")
-    print_separator("=")
-    print()
-
-    # Показываем задачу
-    print_task_block(TASK, GROUND_TRUTH)
-
-    input("  Нажмите Enter, чтобы запустить решение (8 вызовов DeepSeek API)... ")
-    print()
-
-    # ── Запуск четырёх методов ──────────────────────────────────────────────
-
+def _run_methods(task):
+    """Запускает все четыре метода и возвращает список результатов."""
     methods = [
         ("Прямой ответ", solve_direct),
         ("Пошаговое решение", solve_step_by_step),
@@ -638,15 +623,14 @@ def main():
     for i, (name, func) in enumerate(methods, 1):
         print_progress(f"[{i}/4] {name}")
         try:
-            result = func(TASK)
-            # Эвристическая проверка
+            result = func(task)
             criteria = check_criteria(result["text"])
             result["criteria_score"] = criteria["score"]
             result["criteria_hits"] = criteria["hits"]
             results.append(result)
             print(f"       Готово (критериев: {criteria['score']}/3, "
                   f"время: {result['duration']:.2f} с)")
-        except Exception as e:
+        except (APIError, IndexError, AttributeError) as e:
             print(f"       ОШИБКА: {e}")
             results.append(make_result(
                 title=f"ОШИБКА: {name}",
@@ -658,50 +642,11 @@ def main():
             ))
         print()
 
-    # ── Поочерёдный показ результатов ───────────────────────────────────────
+    return results
 
-    print_separator("-")
-    print("  Результаты (нажмите Enter для перехода к следующему)")
-    print_separator("-")
-    print()
 
-    for i, result in enumerate(results):
-        print_result(result, show_intermediate=(result["method"] == "auto_prompt"))
-        if i < len(results) - 1:
-            input("  Нажмите Enter для следующего результата... ")
-            print()
-
-    # ── Оценка AI-судьёй ────────────────────────────────────────────────────
-
-    print()
-    print_progress("Оценка AI-судьёй (5-й вызов API)")
-    try:
-        ai_eval = evaluate_answers(results, TASK)
-        print("       Готово")
-    except Exception as e:
-        print(f"       ОШИБКА при оценке: {e}")
-        ai_eval = {"judge_text": f"Оценка не удалась: {e}", "finish": "error"}
-
-    # Извлекаем баллы из вердикта и добавляем в результаты
-    parsed = parse_judge_scores(ai_eval["judge_text"])
-    for result in results:
-        method_num = results.index(result) + 1
-        result["ai_score"] = parsed["scores"].get(method_num)
-
-    # ── Сводная таблица ─────────────────────────────────────────────────────
-
-    print_comparison_table(results)
-
-    # ── Вердикт судьи ───────────────────────────────────────────────────────
-
-    print_ai_evaluation(ai_eval)
-
-    # ── Эталон ──────────────────────────────────────────────────────────────
-
-    print_ground_truth()
-
-    # ── Итоги ────────────────────────────────────────────────────────────────
-
+def _print_summary(results, parsed):
+    """Выводит блок итогов: лучший метод по AI, по эвристике, самый быстрый."""
     print_header("Итоги")
 
     best_from_ai = parsed.get("best_method")
@@ -715,7 +660,6 @@ def main():
         print(f"  Лучший метод по версии AI-судьи: {best_from_ai}. "
               f"{method_names.get(best_from_ai, '')}")
 
-    # Находим метод с максимальным эвристическим счётом
     max_criteria = max(
         (r for r in results if r.get("criteria_score") is not None),
         key=lambda r: r["criteria_score"],
@@ -726,7 +670,6 @@ def main():
               f"{max_criteria['criteria_score']}/3 — "
               f"{max_criteria['title'].split('(')[0].strip()}")
 
-    # Самый быстрый
     fastest = min(results, key=lambda r: r["duration"])
     print(f"  Самый быстрый: {fastest['duration']:.2f} с — "
           f"{fastest['title'].split('(')[0].strip()}")
@@ -734,6 +677,56 @@ def main():
     print()
     print_separator("=")
     print()
+
+
+def main():
+    """Запускает все четыре метода, сравнивает и выводит результаты."""
+    print()
+    print_separator("=")
+    print("  День 3: Разные способы рассуждения")
+    print("  Missing Dollar Riddle — 4 способа, 1 задача")
+    print_separator("=")
+    print()
+
+    print_task_block(TASK, GROUND_TRUTH)
+
+    input("  Нажмите Enter, чтобы запустить решение (8 вызовов DeepSeek API)... ")
+    print()
+
+    # Запуск четырёх методов
+    results = _run_methods(TASK)
+
+    # Поочерёдный показ результатов
+    print_separator("-")
+    print("  Результаты (нажмите Enter для перехода к следующему)")
+    print_separator("-")
+    print()
+
+    for i, result in enumerate(results):
+        print_result(result, show_intermediate=(result["method"] == "auto_prompt"))
+        if i < len(results) - 1:
+            input("  Нажмите Enter для следующего результата... ")
+            print()
+
+    # Оценка AI-судьёй
+    print()
+    print_progress("Оценка AI-судьёй (5-й вызов API)")
+    try:
+        ai_eval = evaluate_answers(results, TASK)
+        print("       Готово")
+    except (APIError, IndexError, AttributeError) as e:
+        print(f"       ОШИБКА при оценке: {e}")
+        ai_eval = {"judge_text": f"Оценка не удалась: {e}", "finish": "error"}
+
+    parsed = parse_judge_scores(ai_eval["judge_text"])
+    for result in results:
+        method_num = results.index(result) + 1
+        result["ai_score"] = parsed["scores"].get(method_num)
+
+    print_comparison_table(results)
+    print_ai_evaluation(ai_eval)
+    print_ground_truth()
+    _print_summary(results, parsed)
 
 
 if __name__ == "__main__":
