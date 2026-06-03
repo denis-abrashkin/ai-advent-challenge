@@ -15,6 +15,7 @@
 """
 
 import os
+import re
 import textwrap
 import time
 from openai import APIError, OpenAI
@@ -117,8 +118,9 @@ def ask(messages, **kwargs):
 # ── Вспомогательные структуры ──────────────────────────────────────────────────
 
 
-def make_result(title, method_key, params, text, finish, duration, *,
-                steps=1, intermediate=None):
+def make_result(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        title, method_key, params, text, finish, duration, *,
+        steps=1, intermediate=None):
     """Создаёт стандартизированный словарь результата."""
     return {
         "title": title,
@@ -439,7 +441,6 @@ def parse_judge_scores(judge_text):
     Ищет строки вида «Среднее: X.Y/10» после каждого метода.
     Возвращает словарь {method_num: float_score} и номер лучшего метода.
     """
-    import re
 
     scores = {}
     lines = judge_text.split("\n")
@@ -556,10 +557,9 @@ def print_comparison_table(results):
             text = text[:width - 1] + "…"
         if align == "<":
             return f" {text:<{width}} "
-        elif align == ">":
+        if align == ">":
             return f" {text:>{width}} "
-        else:
-            return f" {text:^{width}} "
+        return f" {text:^{width}} "
 
     top = "┌" + "┬".join("─" * (w + 2) for w in col_widths) + "┐"
     sep = "├" + "┼".join("─" * (w + 2) for w in col_widths) + "┤"
@@ -703,7 +703,7 @@ def main():
     print()
 
     for i, result in enumerate(results):
-        print_result(result, show_intermediate=(result["method"] == "auto_prompt"))
+        print_result(result, show_intermediate=result["method"] == "auto_prompt")
         if i < len(results) - 1:
             input("  Нажмите Enter для следующего результата... ")
             print()
