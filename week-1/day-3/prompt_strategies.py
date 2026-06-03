@@ -546,52 +546,48 @@ def print_comparison_table(results):
     """Сводная таблица сравнения всех методов."""
     print_header("Сравнение методов")
 
-    # Заголовки и ширины колонок
     headers = ["Метод", "API", "Симв.", "Слов", "Время", "Крит.", "AI"]
-    col_widths = [24, 4, 7, 6, 9, 6, 5]
+    col_widths = [18, 5, 6, 5, 8, 5, 5]
 
-    # Верхняя граница
+    def cell(text, width, align="<"):
+        """Форматирует ячейку ровно в width+2 символов."""
+        text = str(text)
+        if len(text) > width:
+            text = text[:width - 1] + "…"
+        if align == "<":
+            return f" {text:<{width}} "
+        elif align == ">":
+            return f" {text:>{width}} "
+        else:
+            return f" {text:^{width}} "
+
     top = "┌" + "┬".join("─" * (w + 2) for w in col_widths) + "┐"
-    print(top)
-
-    # Заголовки
-    cells = []
-    for h, w in zip(headers, col_widths):
-        cells.append(f" {h:^{w}}")
-    print("│" + "│".join(cells) + "│")
-
-    # Разделитель
     sep = "├" + "┼".join("─" * (w + 2) for w in col_widths) + "┤"
+    bottom = "└" + "┴".join("─" * (w + 2) for w in col_widths) + "┘"
+
+    print(top)
+    print("│" + "│".join(cell(h, w, "^") for h, w in zip(headers, col_widths)) + "│")
     print(sep)
 
-    # Данные
     for r in results:
-        short_title = r["title"].split("(")[0].strip().replace(
-            "1. ", ""
-        ).replace("2. ", "").replace("3. ", "").replace("4. ", "")
-        # Обрезаем название до ширины колонки
-        if len(short_title) > 23:
-            short_title = short_title[:22] + "…"
+        short_title = r["title"].split("(")[0].strip()
+        short_title = short_title.replace("1. ", "").replace(
+            "2. ", "").replace("3. ", "").replace("4. ", "")
 
         ai_score = r.get("ai_score")
-        if ai_score is not None:
-            ai_str = f"{ai_score:.1f}"
-        else:
-            ai_str = "?"
+        ai_str = f"{ai_score:.1f}" if ai_score is not None else "?"
 
-        row = [
-            f" {short_title:<{col_widths[0] - 1}}",
-            f" {r['steps']:>2} ",
-            f" {r['char_count']:>5} ",
-            f" {r['word_count']:>4} ",
-            f" {r['duration']:>5.1f} с ",
-            f"  {r.get('criteria_score', '?'):>1}/3  ",
-            f"  {ai_str:>4} ",
+        row_cells = [
+            cell(short_title, col_widths[0], "<"),
+            cell(r["steps"], col_widths[1], ">"),
+            cell(r["char_count"], col_widths[2], ">"),
+            cell(r["word_count"], col_widths[3], ">"),
+            cell(f"{r['duration']:.1f} с", col_widths[4], ">"),
+            cell(f"{r.get('criteria_score', '?')}/3", col_widths[5], ">"),
+            cell(ai_str, col_widths[6], ">"),
         ]
-        print("│" + "│".join(row) + "│")
+        print("│" + "│".join(row_cells) + "│")
 
-    # Нижняя граница
-    bottom = "└" + "┴".join("─" * (w + 2) for w in col_widths) + "┘"
     print(bottom)
 
 
