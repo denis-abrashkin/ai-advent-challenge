@@ -1,10 +1,10 @@
 """
 День 4. Температура
 ===================
-Интерактивный CLI: вводишь запрос — получаешь ответы при трёх значениях
-temperature (0, 0.7, 1.2) с анализом точности, креативности и разнообразия.
+Интерактивный CLI: вводишь запрос — получаешь ответы при пяти значениях
+temperature (0, 0.7, 1.2, 1.5, 2.0) с анализом точности, креативности
+и отклонения от детерминированного ответа.
 
-Каждый температурный режим запускается 3 раза для измерения diversity.
 Затем AI-судья оценивает все ответы и даёт рекомендации.
 """
 
@@ -28,8 +28,7 @@ client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
 SYSTEM_BASE = "You are a helpful assistant. Do not use emojis in your responses."
 
-TEMPERATURES = [0.0, 0.7, 1.2]
-RUNS_PER_TEMP = 3
+TEMPERATURES = [0.0, 0.7, 1.2, 1.5, 2.0]
 
 # ── Вызов API ──────────────────────────────────────────────────────────────────
 
@@ -49,12 +48,11 @@ def ask(messages, temperature=0.0, **kwargs):
 # ── Эксперимент ────────────────────────────────────────────────────────────────
 
 
-def make_run(temperature, run_num, text, finish, duration):
+def make_result(temperature, text, finish, duration):
     """Создаёт словарь результата одного запуска."""
     words = text.split() if text else []
     return {
         "temperature": temperature,
-        "run": run_num,
         "text": text.strip(),
         "finish": finish,
         "duration": duration,
@@ -63,25 +61,22 @@ def make_run(temperature, run_num, text, finish, duration):
     }
 
 
-def run_temperature(query, temperature, runs=RUNS_PER_TEMP):
-    """Запускает промпт при заданной температуре N раз. Возвращает список RunResult."""
-    results = []
-    for i in range(runs):
-        t0 = time.time()
-        try:
-            text, finish = ask(
-                messages=[
-                    {"role": "system", "content": SYSTEM_BASE},
-                    {"role": "user", "content": query},
-                ],
-                temperature=temperature,
-            )
-        except (APIError, ConnectionError, TimeoutError) as e:
-            text = f"[ОШИБКА: {e}]"
-            finish = "error"
-        duration = time.time() - t0
-        results.append(make_run(temperature, i + 1, text, finish, duration))
-    return results
+def run_temperature(query, temperature):
+    """Один прогон промпта при заданной температуре."""
+    t0 = time.time()
+    try:
+        text, finish = ask(
+            messages=[
+                {"role": "system", "content": SYSTEM_BASE},
+                {"role": "user", "content": query},
+            ],
+            temperature=temperature,
+        )
+    except (APIError, ConnectionError, TimeoutError) as e:
+        text = f"[ОШИБКА: {e}]"
+        finish = "error"
+    duration = time.time() - t0
+    return make_result(temperature, text, finish, duration)
 
 
 # ── Метрики ────────────────────────────────────────────────────────────────────
@@ -120,25 +115,6 @@ def cosine_similarity(text_a, text_b):
     return dot / (norm_a * norm_b)
 
 
-def calc_consistency(group):
-    """
-    Среднее косинусное сходство между всеми парами в группе (0..1).
-    1 = все ответы идентичны, 0 = полностью разные.
-    """
-    if len(group) < 2:
-        return 1.0
-    sims = []
-    for i in range(len(group)):
-        for j in range(i + 1, len(group)):
-            sims.append(cosine_similarity(group[i]["text"], group[j]["text"]))
-    return sum(sims) / len(sims) if sims else 1.0
-
-
-def calc_diversity(group):
-    """Разнообразие = 1 - consistency."""
-    return 1.0 - calc_consistency(group)
-
-
 # ── AI-судья ──────────────────────────────────────────────────────────────────
 
 JUDGE_SYSTEM = textwrap.dedent("""\
@@ -147,41 +123,47 @@ JUDGE_SYSTEM = textwrap.dedent("""\
 
     Тебе будут предоставлены:
     1. Исходный запрос пользователя
-    2. 9 ответов — по 3 прогона при каждой температуре (0.0, 0.7, 1.2)
+    2. 5 ответов — по одному при каждой температуре (0.0, 0.7, 1.2, 1.5, 2.0)
 
-    Оцени каждую группу из 3 ответов для каждой температуры по критериям
+    Оцени каждый ответ по следующим критериям
     (оценка от 1 до 10, можно с одним знаком после запятой):
 
-    1. ACCURACY (Точность) — насколько ответы фактологически верны, релевантны
-       и соответствуют запросу пользователя?
-    2. CREATIVITY (Креативность) — насколько ответы оригинальны, образны
-       и лексически богаты? Обрати внимание на необычные аналогии, метафоры,
+    1. ACCURACY (Точность) — насколько ответ фактологически верен, релевантен
+       и соответствует запросу пользователя?
+    2. CREATIVITY (Креативность) — насколько ответ оригинален, образен
+       и лексически богат? Обрати внимание на необычные аналогии, метафоры,
        примеры и разнообразие словарного запаса.
-    3. CONSISTENCY (Согласованность) — насколько похожи 3 ответа внутри одной
-       температурной группы? (Высокая согласованность = почти идентичные ответы,
-       низкая = разнообразные.)
 
     Формат вывода (строго):
 
     Temperature 0.0:
-      Accuracy: X/10  Creativity: Y/10  Consistency: Z/10
+      Accuracy: X/10  Creativity: Y/10
       Avg: A/10
       Note: <одно предложение>
 
     Temperature 0.7:
-      Accuracy: X/10  Creativity: Y/10  Consistency: Z/10
+      Accuracy: X/10  Creativity: Y/10
       Avg: A/10
       Note: <одно предложение>
 
     Temperature 1.2:
-      Accuracy: X/10  Creativity: Y/10  Consistency: Z/10
+      Accuracy: X/10  Creativity: Y/10
+      Avg: A/10
+      Note: <одно предложение>
+
+    Temperature 1.5:
+      Accuracy: X/10  Creativity: Y/10
+      Avg: A/10
+      Note: <одно предложение>
+
+    Temperature 2.0:
+      Accuracy: X/10  Creativity: Y/10
       Avg: A/10
       Note: <одно предложение>
 
     === Summary ===
     Best temperature for accuracy: <значение>
     Best temperature for creativity: <значение>
-    Best temperature for consistency: <значение>
     Overall recommendation: <2-3 предложения о том, когда использовать каждую температуру>
 """)
 
@@ -189,11 +171,11 @@ JUDGE_SYSTEM = textwrap.dedent("""\
 def judge_responses(query, all_results):
     """
     Отдельный вызов API (temperature=0) для оценки всех ответов судьёй.
-    all_results — плоский список ответов со всех температур.
+    all_results — список ответов {temperature, text, ...}.
     """
     parts = [f"=== USER QUERY ===\n{query}\n"]
     for r in all_results:
-        label = f"Temperature {r['temperature']}, Run {r['run']}"
+        label = f"Temperature {r['temperature']}"
         parts.append(f"=== {label} ===\n{r['text']}\n")
     judge_input = "\n".join(parts)
 
@@ -210,13 +192,11 @@ def judge_responses(query, all_results):
 def parse_judge_scores(judge_text):
     """
     Извлекает оценки и рекомендации из вердикта судьи.
-    Возвращает словарь с баллами по каждой температуре и рекомендациям.
     """
     result = {
         "scores": {},
         "best_accuracy": None,
         "best_creativity": None,
-        "best_consistency": None,
         "recommendation": "",
     }
 
@@ -224,7 +204,6 @@ def parse_judge_scores(judge_text):
     current_temp = None
 
     for line in lines:
-        # Определяем текущую температуру
         temp_match = re.match(r"Temperature\s+(\d+\.?\d*):", line)
         if temp_match:
             current_temp = float(temp_match.group(1))
@@ -234,15 +213,14 @@ def parse_judge_scores(judge_text):
         if current_temp is None:
             continue
 
-        # Accuracy / Creativity / Consistency
+        # Accuracy / Creativity
         scores_match = re.search(
-            r"Accuracy:\s*([\d.]+).*?Creativity:\s*([\d.]+).*?Consistency:\s*([\d.]+)",
+            r"Accuracy:\s*([\d.]+).*?Creativity:\s*([\d.]+)",
             line,
         )
         if scores_match:
             result["scores"][current_temp]["accuracy"] = float(scores_match.group(1))
             result["scores"][current_temp]["creativity"] = float(scores_match.group(2))
-            result["scores"][current_temp]["consistency"] = float(scores_match.group(3))
             continue
 
         # Avg
@@ -250,7 +228,7 @@ def parse_judge_scores(judge_text):
         if avg_match and current_temp in result["scores"]:
             result["scores"][current_temp]["avg"] = float(avg_match.group(1))
 
-    # Ищем Summary-блок
+    # Summary-блок
     summary_lines = []
     in_summary = False
     for line in lines:
@@ -268,10 +246,6 @@ def parse_judge_scores(judge_text):
         best_cre = re.search(r"Best temperature for creativity:\s*([\d.]+)", line)
         if best_cre:
             result["best_creativity"] = float(best_cre.group(1))
-            continue
-        best_con = re.search(r"Best temperature for consistency:\s*([\d.]+)", line)
-        if best_con:
-            result["best_consistency"] = float(best_con.group(1))
             continue
         rec_match = re.search(r"Overall recommendation:\s*(.+)", line)
         if rec_match:
@@ -311,69 +285,85 @@ def print_progress(label):
     print(f"  >>> {label}...")
 
 
-def print_results_by_temp(by_temp):
-    """Выводит все ответы, сгруппированные по температуре."""
-    for temp in TEMPERATURES:
-        print_header(f"Temperature = {temp}")
-        for r in by_temp[temp]:
-            tag = f"Запуск {r['run']} — {r['word_count']} слов, {r['duration']:.1f} с"
-            print(f"┌─ {tag}")
-            for line in r["text"].split("\n"):
-                print(f"│ {line}")
-            print(f"└{'─' * BOX_WIDTH}")
-            print()
+def print_format_label(temp):
+    """Форматирует заголовок для заданной температуры."""
+    return f"T={temp}"
 
 
-def print_metrics_table(by_temp, parsed):
+def print_all_responses(all_results):
+    """Выводит все ответы подряд с меткой температуры."""
+    print_header("Все ответы")
+    for r in all_results:
+        label = print_format_label(r["temperature"])
+        print(f"┌─ {label} ({r['word_count']} слов, {r['duration']:.1f} с)")
+        for line in r["text"].split("\n"):
+            print(f"│ {line}")
+        print(f"└{'─' * BOX_WIDTH}")
+        print()
+
+
+def print_metrics_table(all_results, parsed):
     """Сводная таблица сравнения всех температур."""
     print_header("Сводка метрик")
 
     # --- Объективные метрики ---
     print("  Объективные метрики:")
     print()
-    header = f"  {'Параметр':<30} {'T=0.0':>10} {'T=0.7':>10} {'T=1.2':>10}"
-    print(header)
-    print(f"  {'─' * 30} {'─' * 10} {'─' * 10} {'─' * 10}")
 
-    metrics = [
-        ("Средняя длина (слов)",
-         lambda g: f"{sum(r['word_count'] for r in g) / len(g):.0f}"),
+    baseline = None
+    for r in all_results:
+        if r["temperature"] == 0.0:
+            baseline = r["text"]
+            break
+
+    col_width = 10
+    header_parts = ["  Параметр".ljust(30)]
+    for t in TEMPERATURES:
+        header_parts.append(f"T={t}".rjust(col_width))
+    print("".join(header_parts))
+    print("  " + "─" * 30 + " " + " ".join("─" * col_width for _ in TEMPERATURES))
+
+    for name, getter in [
+        ("Длина (слов)", lambda r: f"{r['word_count']}"),
         ("TTR (лексическое богатство)",
-         lambda g: f"{sum(calc_type_token_ratio(r['text']) for r in g) / len(g):.3f}"),
-        ("Consistency",
-         lambda g: f"{calc_consistency(g):.3f}"),
-        ("Diversity",
-         lambda g: f"{1.0 - calc_consistency(g):.3f}"),
-        ("Среднее время (с)",
-         lambda g: f"{sum(r['duration'] for r in g) / len(g):.1f}"),
-    ]
+         lambda r: f"{calc_type_token_ratio(r['text']):.3f}"),
+        ("Время (с)", lambda r: f"{r['duration']:.1f}"),
+    ]:
+        vals = [getter(r).rjust(col_width) for r in all_results]
+        print(f"  {name:<30}", *vals)
 
-    for name, getter in metrics:
-        vals = [getter(by_temp[t]) for t in TEMPERATURES]
-        print(f"  {name:<30} {vals[0]:>10} {vals[1]:>10} {vals[2]:>10}")
+    # Сходство с T=0
+    if baseline:
+        sim_vals = []
+        for r in all_results:
+            sim = cosine_similarity(r["text"], baseline)
+            sim_vals.append(f"{sim:.3f}".rjust(col_width))
+        print(f"  {'Сходство с T=0':<30}", *sim_vals)
+
     print()
 
     # --- AI-оценки ---
     if parsed["scores"]:
         print("  Оценки AI-судьи (из 10):")
         print()
-        h = f"  {'Критерий':<30} {'T=0.0':>10} {'T=0.7':>10} {'T=1.2':>10}"
-        print(h)
-        print(f"  {'─' * 30} {'─' * 10} {'─' * 10} {'─' * 10}")
+        h_parts = ["  Критерий".ljust(30)]
+        for t in TEMPERATURES:
+            h_parts.append(f"T={t}".rjust(col_width))
+        print("".join(h_parts))
+        print("  " + "─" * 30 + " " + " ".join("─" * col_width for _ in TEMPERATURES))
 
-        for criterion in ("accuracy", "creativity", "consistency", "avg"):
+        for criterion in ("accuracy", "creativity", "avg"):
             vals = []
             for t in TEMPERATURES:
                 if t in parsed["scores"] and criterion in parsed["scores"][t]:
                     s = parsed["scores"][t].get(criterion)
-                    vals.append(f"{s:.1f}" if s is not None else "?")
+                    vals.append(f"{s:.1f}".rjust(col_width) if s is not None else "?".rjust(col_width))
                 else:
-                    vals.append("?")
+                    vals.append("?".rjust(col_width))
             label = {"accuracy": "Точность",
                      "creativity": "Креативность",
-                     "consistency": "Согласованность",
                      "avg": "Среднее"}.get(criterion, criterion)
-            print(f"  {label:<30} {vals[0]:>10} {vals[1]:>10} {vals[2]:>10}")
+            print(f"  {label:<30}", *vals)
         print()
 
 
@@ -390,10 +380,18 @@ def print_recommendations(parsed):
          ["Чат-боты общего назначения, ассистенты",
           "Написание писем, документов, текстов",
           "Объяснения и обучающие материалы"]),
-        (1.2, "Максимальная креативность и разнообразие",
-         ["Мозговой штурм, генерация идей",
-          "Креативное письмо, сторителлинг",
-          "Когда нужно много вариантов одного ответа"]),
+        (1.2, "Повышенная креативность",
+         ["Творческие тексты, сторителлинг",
+          "Маркетинговые и рекламные тексты",
+          "Генерация нескольких вариантов ответа"]),
+        (1.5, "Экспериментальные ответы",
+         ["Мозговой штурм, генерация нестандартных идей",
+          "Задачи, где необычные формулировки — плюс",
+          "Поиск альтернативных решений"]),
+        (2.0, "Максимальная свобода (риск галлюцинаций)",
+         ["Художественное творчество, поэзия",
+          "Когда точность не важна, нужна только оригинальность",
+          "С осторожностью: возможны бессвязные ответы"]),
     ]
 
     for temp, title, bullets in recs:
@@ -402,8 +400,6 @@ def print_recommendations(parsed):
             suffix += " [Лучшая точность]"
         if parsed.get("best_creativity") == temp:
             suffix += " [Лучшая креативность]"
-        if parsed.get("best_consistency") == temp:
-            suffix += " [Лучшая согласованность]"
         print(f"  Temperature = {temp} — {title}{suffix}")
         for b in bullets:
             print(f"    - {b}")
@@ -414,19 +410,8 @@ def print_recommendations(parsed):
         for line in parsed["recommendation"].split(". "):
             line = line.strip()
             if line:
-                print(f"    - {line}." if not line.endswith(".") else f"    - {line}")
-        print()
-
-
-def print_all_responses_grouped(all_results):
-    """Выводит все ответы подряд с меткой температуры для быстрого просмотра."""
-    print_header("Все ответы")
-    for r in all_results:
-        label = f"T={r['temperature']}, Run {r['run']}"
-        print(f"┌─ {label} ({r['word_count']} слов)")
-        for line in r["text"].split("\n"):
-            print(f"│ {line}")
-        print(f"└{'─' * BOX_WIDTH}")
+                end = "." if not line.endswith(".") else ""
+                print(f"    - {line}{end}")
         print()
 
 
@@ -437,7 +422,7 @@ def main():
     """Интерактивный CLI: ввод запроса → эксперимент с температурами."""
     print()
     print("=" * (BOX_WIDTH + 2))
-    print("  День 4: Температура — сравнение temperature 0 / 0.7 / 1.2")
+    print("  День 4: Температура — сравнение 0 / 0.7 / 1.2 / 1.5 / 2.0")
     print("=" * (BOX_WIDTH + 2))
     print()
     print("  Введи 'exit' или 'quit' для выхода.")
@@ -456,24 +441,22 @@ def main():
         if not query:
             continue
 
-        total_calls = len(TEMPERATURES) * RUNS_PER_TEMP + 1  # +1 = AI judge
+        total_calls = len(TEMPERATURES) + 1  # +1 = AI judge
         print()
         print_progress(f"Всего {total_calls} вызовов DeepSeek API")
+        print()
 
         # ── Фаза 1: эксперименты ──────────────────────────────────────────────
-        print()
-        by_temp = {}
         all_results = []
 
         for temp in TEMPERATURES:
-            print(f"  [Temperature = {temp}]")
-            by_temp[temp] = run_temperature(query, temp)
-            for r in by_temp[temp]:
-                all_results.append(r)
-                status = "OK" if r["finish"] != "error" else "ERROR"
-                print(f"    Run {r['run']}: {r['word_count']} слов, "
-                      f"{r['duration']:.1f} с ({status})")
-            print()
+            r = run_temperature(query, temp)
+            all_results.append(r)
+            status = "OK" if r["finish"] != "error" else "ERROR"
+            print(f"  [{r['temperature']:.1f}] {r['word_count']} слов, "
+                  f"{r['duration']:.1f} с ({status})")
+
+        print()
 
         # ── Фаза 2: AI-судья ──────────────────────────────────────────────────
         print_progress("AI-судья оценивает ответы")
@@ -486,19 +469,21 @@ def main():
             judge_result = {"judge_text": f"Оценка не удалась: {e}",
                             "finish": "error"}
             parsed = {"scores": {}, "best_accuracy": None,
-                      "best_creativity": None, "best_consistency": None,
+                      "best_creativity": None,
                       "recommendation": ""}
         print()
 
         # ── Фаза 3: показ всех ответов ───────────────────────────────────────
-        # Спрашиваем, хочет ли пользователь увидеть ответы целиком
         print_progress("Показать все ответы? (Enter — да, n — пропустить)")
-        show_all = input("  >>> ").strip().lower()
+        try:
+            show_all = input("  >>> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            show_all = "n"
         if show_all != "n":
-            print_all_responses_grouped(all_results)
+            print_all_responses(all_results)
 
         # ── Фаза 4: метрики ──────────────────────────────────────────────────
-        print_metrics_table(by_temp, parsed)
+        print_metrics_table(all_results, parsed)
 
         # ── Фаза 5: вердикт судьи ────────────────────────────────────────────
         print_header("Вердикт AI-судьи")
