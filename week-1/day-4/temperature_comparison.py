@@ -213,7 +213,6 @@ def parse_judge_scores(judge_text):
         if current_temp is None:
             continue
 
-        # Accuracy / Creativity
         scores_match = re.search(
             r"Accuracy:\s*([\d.]+).*?Creativity:\s*([\d.]+)",
             line,
@@ -223,12 +222,17 @@ def parse_judge_scores(judge_text):
             result["scores"][current_temp]["creativity"] = float(scores_match.group(2))
             continue
 
-        # Avg
         avg_match = re.search(r"Avg:\s*([\d.]+)", line)
         if avg_match and current_temp in result["scores"]:
             result["scores"][current_temp]["avg"] = float(avg_match.group(1))
 
-    # Summary-блок
+    _parse_summary_block(lines, result)
+
+    return result
+
+
+def _parse_summary_block(lines, result):
+    """Извлекает итоговые рекомендации из Summary-блока вердикта судьи."""
     summary_lines = []
     in_summary = False
     for line in lines:
@@ -257,8 +261,6 @@ def parse_judge_scores(judge_text):
                 r"Best temperature|Overall recommendation:", s
             )
         ).strip()
-
-    return result
 
 
 # ── Вывод ──────────────────────────────────────────────────────────────────────
@@ -317,11 +319,7 @@ def print_metrics_table(all_results, parsed):
             break
 
     col_width = 10
-    header_parts = ["  Параметр".ljust(30)]
-    for t in TEMPERATURES:
-        header_parts.append(f"T={t}".rjust(col_width))
-    print("".join(header_parts))
-    print("  " + "─" * 30 + " " + " ".join("─" * col_width for _ in TEMPERATURES))
+    _print_table_header(col_width)
 
     for name, getter in [
         ("Длина (слов)", lambda r: f"{r['word_count']}"),
@@ -332,7 +330,6 @@ def print_metrics_table(all_results, parsed):
         vals = [getter(r).rjust(col_width) for r in all_results]
         print(f"  {name:<30}", *vals)
 
-    # Сходство с T=0
     if baseline:
         sim_vals = []
         for r in all_results:
@@ -344,27 +341,44 @@ def print_metrics_table(all_results, parsed):
 
     # --- AI-оценки ---
     if parsed["scores"]:
-        print("  Оценки AI-судьи (из 10):")
-        print()
-        h_parts = ["  Критерий".ljust(30)]
-        for t in TEMPERATURES:
-            h_parts.append(f"T={t}".rjust(col_width))
-        print("".join(h_parts))
-        print("  " + "─" * 30 + " " + " ".join("─" * col_width for _ in TEMPERATURES))
+        _print_ai_scores(parsed, col_width)
 
-        for criterion in ("accuracy", "creativity", "avg"):
-            vals = []
-            for t in TEMPERATURES:
-                if t in parsed["scores"] and criterion in parsed["scores"][t]:
-                    s = parsed["scores"][t].get(criterion)
-                    vals.append(f"{s:.1f}".rjust(col_width) if s is not None else "?".rjust(col_width))
+
+def _print_table_header(col_width):
+    """Выводит заголовок таблицы."""
+    h_parts = ["  Параметр".ljust(30)]
+    for t in TEMPERATURES:
+        h_parts.append(f"T={t}".rjust(col_width))
+    print("".join(h_parts))
+    print("  " + "─" * 30 + " " + " ".join("─" * col_width for _ in TEMPERATURES))
+
+
+def _print_ai_scores(parsed, col_width):
+    """Выводит блок оценок AI-судьи."""
+    print("  Оценки AI-судьи (из 10):")
+    print()
+    h_parts = ["  Критерий".ljust(30)]
+    for t in TEMPERATURES:
+        h_parts.append(f"T={t}".rjust(col_width))
+    print("".join(h_parts))
+    print("  " + "─" * 30 + " " + " ".join("─" * col_width for _ in TEMPERATURES))
+
+    for criterion in ("accuracy", "creativity", "avg"):
+        vals = []
+        for t in TEMPERATURES:
+            if t in parsed["scores"] and criterion in parsed["scores"][t]:
+                s = parsed["scores"][t].get(criterion)
+                if s is not None:
+                    vals.append(f"{s:.1f}".rjust(col_width))
                 else:
                     vals.append("?".rjust(col_width))
-            label = {"accuracy": "Точность",
-                     "creativity": "Креативность",
-                     "avg": "Среднее"}.get(criterion, criterion)
-            print(f"  {label:<30}", *vals)
-        print()
+            else:
+                vals.append("?".rjust(col_width))
+        label = {"accuracy": "Точность",
+                 "creativity": "Креативность",
+                 "avg": "Среднее"}.get(criterion, criterion)
+        print(f"  {label:<30}", *vals)
+    print()
 
 
 def print_recommendations(parsed):
@@ -441,63 +455,66 @@ def main():
         if not query:
             continue
 
-        total_calls = len(TEMPERATURES) + 1  # +1 = AI judge
-        print()
-        print_progress(f"Всего {total_calls} вызовов DeepSeek API")
-        print()
+        _run_experiment(query)
 
-        # ── Фаза 1: эксперименты ──────────────────────────────────────────────
-        all_results = []
 
-        for temp in TEMPERATURES:
-            r = run_temperature(query, temp)
-            all_results.append(r)
-            status = "OK" if r["finish"] != "error" else "ERROR"
-            print(f"  [{r['temperature']:.1f}] {r['word_count']} слов, "
-                  f"{r['duration']:.1f} с ({status})")
+def _run_experiment(query):
+    """Полный цикл: эксперименты → судья → вывод."""
+    total_calls = len(TEMPERATURES) + 1
+    print()
+    print_progress(f"Всего {total_calls} вызовов DeepSeek API")
+    print()
 
-        print()
+    # Фаза 1: эксперименты
+    all_results = []
+    for temp in TEMPERATURES:
+        r = run_temperature(query, temp)
+        all_results.append(r)
+        status = "OK" if r["finish"] != "error" else "ERROR"
+        print(f"  [{r['temperature']:.1f}] {r['word_count']} слов, "
+              f"{r['duration']:.1f} с ({status})")
+    print()
 
-        # ── Фаза 2: AI-судья ──────────────────────────────────────────────────
-        print_progress("AI-судья оценивает ответы")
-        try:
-            judge_result = judge_responses(query, all_results)
-            parsed = parse_judge_scores(judge_result["judge_text"])
-            print("       Готово")
-        except (APIError, IndexError, AttributeError) as e:
-            print(f"       ОШИБКА: {e}")
-            judge_result = {"judge_text": f"Оценка не удалась: {e}",
-                            "finish": "error"}
-            parsed = {"scores": {}, "best_accuracy": None,
-                      "best_creativity": None,
-                      "recommendation": ""}
-        print()
+    # Фаза 2: AI-судья
+    print_progress("AI-судья оценивает ответы")
+    try:
+        judge_result = judge_responses(query, all_results)
+        parsed = parse_judge_scores(judge_result["judge_text"])
+        print("       Готово")
+    except (APIError, IndexError, AttributeError) as e:
+        print(f"       ОШИБКА: {e}")
+        judge_result = {"judge_text": f"Оценка не удалась: {e}",
+                        "finish": "error"}
+        parsed = {"scores": {}, "best_accuracy": None,
+                  "best_creativity": None,
+                  "recommendation": ""}
+    print()
 
-        # ── Фаза 3: показ всех ответов ───────────────────────────────────────
-        print_progress("Показать все ответы? (Enter — да, n — пропустить)")
-        try:
-            show_all = input("  >>> ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            show_all = "n"
-        if show_all != "n":
-            print_all_responses(all_results)
+    # Фаза 3: показ ответов
+    print_progress("Показать все ответы? (Enter — да, n — пропустить)")
+    try:
+        show_all = input("  >>> ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        show_all = "n"
+    if show_all != "n":
+        print_all_responses(all_results)
 
-        # ── Фаза 4: метрики ──────────────────────────────────────────────────
-        print_metrics_table(all_results, parsed)
+    # Фаза 4: метрики
+    print_metrics_table(all_results, parsed)
 
-        # ── Фаза 5: вердикт судьи ────────────────────────────────────────────
-        print_header("Вердикт AI-судьи")
-        for line in judge_result["judge_text"].strip().split("\n"):
-            print(f"  {line}")
-        print()
+    # Фаза 5: вердикт судьи
+    print_header("Вердикт AI-судьи")
+    for line in judge_result["judge_text"].strip().split("\n"):
+        print(f"  {line}")
+    print()
 
-        # ── Фаза 6: рекомендации ─────────────────────────────────────────────
-        print_recommendations(parsed)
+    # Фаза 6: рекомендации
+    print_recommendations(parsed)
 
-        print_separator("=")
-        print()
-        print("  Можно ввести новый запрос или exit для выхода.")
-        print()
+    print_separator("=")
+    print()
+    print("  Можно ввести новый запрос или exit для выхода.")
+    print()
 
 
 if __name__ == "__main__":
