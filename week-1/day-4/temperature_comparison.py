@@ -142,46 +142,47 @@ def calc_diversity(group):
 # ── AI-судья ──────────────────────────────────────────────────────────────────
 
 JUDGE_SYSTEM = textwrap.dedent("""\
-    You are an impartial judge evaluating how different temperature settings
-    affect an AI's responses to the same prompt.
+    Ты — беспристрастный судья. Твоя задача — оценить, как разные значения
+    temperature влияют на ответы AI на один и тот же промпт.
 
-    You will be given:
-    1. The original user query
-    2. 9 responses — 3 runs at each temperature (0.0, 0.7, 1.2)
+    Тебе будут предоставлены:
+    1. Исходный запрос пользователя
+    2. 9 ответов — по 3 прогона при каждой температуре (0.0, 0.7, 1.2)
 
-    Evaluate each group of 3 responses per temperature on these criteria
-    (score each from 1 to 10, use 1 decimal place if needed):
+    Оцени каждую группу из 3 ответов для каждой температуры по критериям
+    (оценка от 1 до 10, можно с одним знаком после запятой):
 
-    1. ACCURACY — how factually correct, relevant, and on-topic are the
-       responses given the user's query?
-    2. CREATIVITY — how original, imaginative, and linguistically rich are
-       the responses? Look for unique analogies, metaphors, examples, and
-       vocabulary variety.
-    3. CONSISTENCY — how similar are the 3 responses within this temperature
-       group? (High consistency = nearly identical answers; low = diverse.)
+    1. ACCURACY (Точность) — насколько ответы фактологически верны, релевантны
+       и соответствуют запросу пользователя?
+    2. CREATIVITY (Креативность) — насколько ответы оригинальны, образны
+       и лексически богаты? Обрати внимание на необычные аналогии, метафоры,
+       примеры и разнообразие словарного запаса.
+    3. CONSISTENCY (Согласованность) — насколько похожи 3 ответа внутри одной
+       температурной группы? (Высокая согласованность = почти идентичные ответы,
+       низкая = разнообразные.)
 
-    Output format (strict):
+    Формат вывода (строго):
 
     Temperature 0.0:
       Accuracy: X/10  Creativity: Y/10  Consistency: Z/10
       Avg: A/10
-      Note: <one sentence>
+      Note: <одно предложение>
 
     Temperature 0.7:
       Accuracy: X/10  Creativity: Y/10  Consistency: Z/10
       Avg: A/10
-      Note: <one sentence>
+      Note: <одно предложение>
 
     Temperature 1.2:
       Accuracy: X/10  Creativity: Y/10  Consistency: Z/10
       Avg: A/10
-      Note: <one sentence>
+      Note: <одно предложение>
 
     === Summary ===
-    Best temperature for accuracy: <value>
-    Best temperature for creativity: <value>
-    Best temperature for consistency: <value>
-    Overall recommendation: <2-3 sentences about when to use each temperature>
+    Best temperature for accuracy: <значение>
+    Best temperature for creativity: <значение>
+    Best temperature for consistency: <значение>
+    Overall recommendation: <2-3 предложения о том, когда использовать каждую температуру>
 """)
 
 
@@ -278,8 +279,8 @@ def parse_judge_scores(judge_text):
 
     if not result["recommendation"] and summary_lines:
         result["recommendation"] = " ".join(
-            l for l in summary_lines if not re.match(
-                r"Best temperature|Overall recommendation:", l
+            s for s in summary_lines if not re.match(
+                r"Best temperature|Overall recommendation:", s
             )
         ).strip()
 
@@ -409,7 +410,7 @@ def print_recommendations(parsed):
         print()
 
     if parsed.get("recommendation"):
-        print(f"  Комментарий AI-судьи:")
+        print("  Комментарий AI-судьи:")
         for line in parsed["recommendation"].split(". "):
             line = line.strip()
             if line:
