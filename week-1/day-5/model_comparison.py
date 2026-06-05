@@ -62,6 +62,12 @@ MODELS = [
     },
 ]
 
+# Ссылки на модели в HuggingFace
+MODEL_LINKS = {
+    model["name"]: f"https://huggingface.co/{model['name']}"
+    for model in MODELS
+}
+
 # Системный промпт (без эмодзи, как требует задание)
 SYSTEM_PROMPT = (
     "You are a helpful assistant. Answer concisely and accurately."
@@ -305,7 +311,68 @@ def _save_results_json(output_file, results, extra):
     print(f"  💾 Результаты сохранены в {output_file}")
 
 
-def process_single_query(query, device, max_tokens, temperature, output_file):
+def _result_for_model(results, model_name):
+    """Находит результат для указанной модели."""
+    for r in results:
+        if r.model_name == model_name:
+            return r
+    return None
+
+
+def _save_markdown_report(output_file, results, extra):
+    """Сохраняет сравнительный отчёт в Markdown-файл."""
+    if not output_file:
+        return
+    report_path = output_file.rsplit(".", 1)[0] + ".md"
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("# Сравнение моделей Qwen2.5\n\n")
+        f.write("## Параметры запуска\n\n")
+        f.write(f"- **Устройство:** {extra.get('device', '—')}\n")
+        f.write(f"- **Температура:** {extra.get('temperature', '—')}\n")
+        f.write(f"- **Макс. токенов:** {extra.get('max_tokens', '—')}\n")
+        if extra.get("prompt"):
+            f.write(f"- **Запрос:** {extra['prompt']}\n")
+        f.write("\n")
+
+        f.write("## Сравнительная таблица\n\n")
+        # Header
+        f.write("| Метрика |")
+        for mc in MODELS:
+            f.write(f" {mc['params_b']}B |")
+        f.write("\n|")
+        f.write("---------|")
+        for _ in MODELS:
+            f.write(":----:|")
+        f.write("\n")
+
+        # Строки таблицы
+        for label, attr, fmt in (
+            ("Время (с)", "duration_seconds", "{:.1f}"),
+            ("Входных токенов", "tokens_input", "{}"),
+            ("Выходных токенов", "tokens_output", "{}"),
+            ("Скорость (ток/с)", "tokens_per_second", "{:.1f}"),
+        ):
+            f.write(f"| {label} |")
+            for mc in MODELS:
+                r = _result_for_model(results, mc["name"])
+                if r and not r.error:
+                    f.write(f" {fmt.format(getattr(r, attr))} |")
+                else:
+                    f.write(" — |")
+            f.write("\n")
+
+        f.write("\n")
+        f.write("## Ссылки на модели\n\n")
+        for mc in MODELS:
+            url = MODEL_LINKS.get(mc["name"], "")
+            f.write(f"- [{mc['name'].rsplit('/', maxsplit=1)[-1]}]({url})\n")
+        f.write("\n")
+
+    print(f"  📊 Отчёт сохранён в {report_path}")
+
+
+def process_single_query(query, device, max_tokens, temperature, output_file):  # pylint: disable=too-many-locals
     """Прогоняет один запрос через все модели и показывает результат."""
     print()
     print_progress(f"Запрос: {query[:80]}")
@@ -372,10 +439,12 @@ def process_single_query(query, device, max_tokens, temperature, output_file):
                 print(f"  ❌ {model_cfg['label']}: ОШИБКА — {e}")
 
     print()
-    _save_results_json(output_file, all_results, {
+    extra = {
         "device": device, "prompt": query,
         "max_tokens": max_tokens, "temperature": temperature,
-    })
+    }
+    _save_results_json(output_file, all_results, extra)
+    _save_markdown_report(output_file, all_results, extra)
     print_header("Ответы моделей")
     show_model_responses(all_results)
     print_header("Сравнение метрик")
@@ -387,6 +456,7 @@ def process_single_query(query, device, max_tokens, temperature, output_file):
 
 
 def main():
+    """Точка входа: интерактивный режим или разовый запрос."""
     parser = argparse.ArgumentParser(
         description="День 5: Сравнение слабой / средней / сильной модели HuggingFace"
     )
