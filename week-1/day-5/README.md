@@ -15,12 +15,11 @@
 - время ответа (сек)
 - количество токенов (входных и выходных)
 - скорость генерации (токенов/c)
-- стоимость (расчётная, по ценам HuggingFace Inference API)
 
 ### Сравнение
 - качество ответов
 - скорость инференса
-- ресурсоёмкость
+- ресурсоёмкость (параметры, память)
 
 ## Результаты (M2 Pro, MPS, fp16)
 
@@ -50,44 +49,47 @@ pip install transformers torch accelerate sentencepiece
 ```
 
 Модели скачиваются из HuggingFace Hub автоматически при первом запуске
-и кешируются в `~/.cache/huggingface/hub/`.
+и кешируются в `dev/.huggingface/hub/`.
 
 > **ℹ️ Для Apple Silicon (MPS):** `torch` автоматически использует Metal Performance Shaders.
-  Для ускорения загрузки моделей рекомендуется установить `HF_TOKEN`:
+  Для ускорения загрузки моделей можно установить `HF_TOKEN`:
   ```bash
   export HF_TOKEN="ваш_токен"
   ```
   Получить токен: https://huggingface.co/settings/tokens
 
+> **ℹ️** `__pycache__` отключён через `PYTHONDONTWRITEBYTECODE=1` в `.venv/bin/activate`.
+
 ## Использование
 
+Скрипт работает в **интерактивном режиме** (как day-1 — day-4):
+
 ```bash
-# Все модели на всех тестовых промптах
+# Активировать окружение и запустить
+source .venv/bin/activate
 python3 week-1/day-5/model_comparison.py
+```
 
-# Только слабая модель на одном промпте
-python3 week-1/day-5/model_comparison.py --model weak --prompt "Расскажи о ML"
+Вводишь запрос — получаешь ответы от всех трёх моделей + таблицу метрик.
+Для выхода: `exit` / `quit` / `выход`.
 
-# Сохранение результатов
-python3 week-1/day-5/model_comparison.py --output results.json
+### Режим одного запроса (без интерактива)
+
+```bash
+python3 week-1/day-5/model_comparison.py --prompt "Объясни ML за 30 секунд"
+# или сохранить результат в JSON:
+python3 week-1/day-5/model_comparison.py --prompt "Что такое тензор?" --output results.json
 ```
 
 ## Параметры
 
 | Параметр | Описание | По умолчанию |
 |---|---|---|
-| `--prompt, -p` | Один кастомный промпт | (все тестовые) |
-| `--model, -m` | Фильтр моделей (weak, medium, strong) | (все три) |
-| `--device, -d` | Устройство (cpu, mps, cuda) | автоопределение |
+| `--prompt, -p` | Одиночный запрос (без интерактива) | (интерактив) |
+| `--device, -d` | Устройство: cpu, mps, cuda | автоопределение |
 | `--max-tokens` | Макс. токенов на ответ | 256 |
 | `--temperature, -t` | Температура семплинга | 0.7 |
-| `--output, -o` | Путь к JSON для сохранения | (нет) |
-
-## Тестовые промпты
-
-1. "Explain the difference between supervised and unsupervised learning in two sentences."
-2. "Write a short poem about artificial intelligence (4 lines max)."
-3. "What is 124 * 37? Show your reasoning step by step."
+| `--output, -o` | Сохранять результаты в JSON | (нет) |
 
 ## Ссылки
 
