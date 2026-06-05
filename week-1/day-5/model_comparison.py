@@ -72,7 +72,7 @@ SYSTEM_PROMPT = (
 
 
 @dataclass
-class ModelResult:
+class ModelResult:  # pylint: disable=too-many-instance-attributes
     """Результат одного прогона модели для одного промпта."""
     model_name: str
     model_label: str
@@ -149,7 +149,7 @@ def managed_model(model_id: str, device: str):
         del tokenizer
         gc.collect()
         if device == "mps":
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(RuntimeError):
                 torch.mps.empty_cache()
 
 
@@ -160,7 +160,6 @@ def run_inference(
     model,
     tokenizer,
     prompt: str,
-    device: str,
     max_new_tokens: int = 256,
     temperature: float = 0.7,
 ) -> tuple[str, int, int]:
@@ -286,6 +285,26 @@ def show_metrics_table(all_results):
     print(parts)
 
 
+def _save_results_json(output_file, results, extra):
+    """Сохраняет результаты в JSON-файл (дозаписывает в массив)."""
+    if not output_file:
+        return
+    data = {**extra, "results": [asdict(r) for r in results]}
+    existing = []
+    if os.path.exists(output_file):
+        try:
+            with open(output_file, encoding="utf-8") as f:
+                content = json.load(f)
+                if isinstance(content, list):
+                    existing = content
+        except (json.JSONDecodeError, OSError):
+            existing = []
+    existing.append(data)
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(existing, f, ensure_ascii=False, indent=2)
+    print(f"  💾 Результаты сохранены в {output_file}")
+
+
 def process_single_query(query, device, max_tokens, temperature, output_file):
     """Прогоняет один запрос через все модели и показывает результат."""
     print()
@@ -313,7 +332,7 @@ def process_single_query(query, device, max_tokens, temperature, output_file):
             t0 = time.time()
             try:
                 response, inp_len, out_len = run_inference(
-                    model, tokenizer, query, device,
+                    model, tokenizer, query,
                     max_new_tokens=max_tokens,
                     temperature=temperature,
                 )
@@ -334,10 +353,9 @@ def process_single_query(query, device, max_tokens, temperature, output_file):
                     tokens_per_second=tok_per_sec,
                     quantization=quant,
                 ))
-                status_icon = "✅" if not response.startswith("[ОШИБКА") else "❌"
-                print(f"  {status_icon} {model_cfg['label']}: {out_len} токенов, "
+                print(f"  ✅ {model_cfg['label']}: {out_len} токенов, "
                       f"{elapsed:.1f}с ({tok_per_sec:.1f} ток/с)")
-            except Exception as e:
+            except (RuntimeError, ValueError, OSError) as e:
                 elapsed = time.time() - t0
                 all_results.append(ModelResult(
                     model_name=model_cfg["name"],
@@ -354,39 +372,14 @@ def process_single_query(query, device, max_tokens, temperature, output_file):
                 print(f"  ❌ {model_cfg['label']}: ОШИБКА — {e}")
 
     print()
-
-    # Сохраняем в JSON если указан файл
-    if output_file:
-        data = {
-            "device": device,
-            "prompt": query,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "results": [asdict(r) for r in all_results],
-        }
-        # Загружаем существующие результаты или начинаем новый список
-        existing = []
-        if os.path.exists(output_file):
-            try:
-                with open(output_file, "r", encoding="utf-8") as f:
-                    existing_json = json.load(f)
-                    if isinstance(existing_json, list):
-                        existing = existing_json
-            except (json.JSONDecodeError, ValueError):
-                existing = []
-        existing.append(data)
-        with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(existing, f, ensure_ascii=False, indent=2)
-        print(f"  💾 Результаты сохранены в {output_file}")
-
-    # Показываем ответы
+    _save_results_json(output_file, all_results, {
+        "device": device, "prompt": query,
+        "max_tokens": max_tokens, "temperature": temperature,
+    })
     print_header("Ответы моделей")
     show_model_responses(all_results)
-
-    # Метрики
     print_header("Сравнение метрик")
     show_metrics_table(all_results)
-
     print()
 
 
@@ -433,7 +426,9 @@ def main():
     # Режим: одиночный запрос (без интерактива)
     if args.prompt:
         print(f"  Устройство: {device}")
-        process_single_query(args.prompt, device, args.max_tokens, args.temperature, args.output)
+        process_single_query(
+            args.prompt, device, args.max_tokens, args.temperature, args.output
+        )
         return
 
     # ── Интерактивный режим ────────────────────────────────────────────────────
@@ -463,7 +458,9 @@ def main():
         if not query:
             continue
 
-        process_single_query(query, device, args.max_tokens, args.temperature, args.output)
+        process_single_query(
+            query, device, args.max_tokens, args.temperature, args.output
+        )
 
 
 if __name__ == "__main__":
