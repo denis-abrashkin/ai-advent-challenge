@@ -124,13 +124,16 @@ def managed_model(model_id: str, device: str):
         print(f"  [Загрузка] {model_id}...", end=" ", flush=True)
         t0 = time.time()
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id, trust_remote_code=True, token=True
+        )
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
         # Определяем dtype и устройство
         load_kwargs = {
             "trust_remote_code": True,
+            "token": True,
         }
 
         if device in ("mps", "cuda"):
