@@ -347,18 +347,24 @@ def _save_markdown_report(output_file, results, extra):
             f.write(":----:|")
         f.write("\n")
 
-        # Строки таблицы
-        for label, attr, fmt in (
-            ("Время (с)", "duration_seconds", "{:.1f}"),
-            ("Входных токенов", "tokens_input", "{}"),
-            ("Выходных токенов", "tokens_output", "{}"),
-            ("Скорость (ток/с)", "tokens_per_second", "{:.1f}"),
+        # Все строки таблицы — ресурсы, скорость, качество
+        for label, cell_fn in (
+            # ── Ресурсоёмкость ──
+            ("Параметры (B)", lambda mc, _r: f"{mc['params_b']:.1f}"),
+            ("Квантизация", lambda _mc, r: r.quantization),
+            ("Память (GB) ≈", lambda mc, _r: f"{mc['params_b'] * 2:.1f}"),
+            # ── Скорость ──
+            ("Время (с)", lambda _mc, r: f"{r.duration_seconds:.1f}"),
+            ("Скорость (ток/с)", lambda _mc, r: f"{r.tokens_per_second:.1f}"),
+            # ── Качество (прокси) ──
+            ("Входных токенов", lambda _mc, r: str(r.tokens_input)),
+            ("Выходных токенов", lambda _mc, r: str(r.tokens_output)),
         ):
             f.write(f"| {label} |")
             for mc in MODELS:
                 r = _result_for_model(results, mc["name"])
                 if r and not r.error:
-                    f.write(f" {fmt.format(getattr(r, attr))} |")
+                    f.write(f" {cell_fn(mc, r)} |")
                 else:
                     f.write(" — |")
             f.write("\n")
