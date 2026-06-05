@@ -19,6 +19,7 @@ import contextlib
 import gc
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, asdict
@@ -372,6 +373,45 @@ def _save_markdown_report(output_file, results, extra):
     print(f"  📊 Отчёт сохранён в {report_path}")
 
 
+def _slugify(text, max_words=5):
+    """Generate a short URL-safe slug from the first words of text."""
+    words = text.split()[:max_words]
+    raw = " ".join(words)
+    clean = re.sub(r"[^a-zA-Z0-9 ]", "", raw).strip().lower()
+    slug = "-".join(clean.split())
+    return slug[:60] or "query"
+
+
+def _next_run_id(base_dir):
+    """Find next run ID from existing numbered folders (NNN-*)."""
+    if not os.path.isdir(base_dir):
+        return 1
+    max_id = 0
+    for entry in os.listdir(base_dir):
+        entry_path = os.path.join(base_dir, entry)
+        if os.path.isdir(entry_path):
+            parts = entry.split("-", 1)
+            if parts[0].isdigit():
+                max_id = max(max_id, int(parts[0]))
+    return max_id + 1
+
+
+def _resolve_output_file(output_target, query):
+    """Resolve output file path: explicit file or auto-save subfolder."""
+    if not output_target:
+        return None
+    # Explicit file path (.json / .md given by user)
+    if output_target.endswith((".json", ".md")):
+        return output_target
+    # Auto-save mode: create numbered subfolder per query
+    os.makedirs(output_target, exist_ok=True)
+    run_id = _next_run_id(output_target)
+    slug = _slugify(query)
+    run_dir = os.path.join(output_target, f"{run_id:03d}-{slug}")
+    os.makedirs(run_dir, exist_ok=True)
+    return os.path.join(run_dir, "results.json")
+
+
 def process_single_query(query, device, max_tokens, temperature, output_file):  # pylint: disable=too-many-locals
     """Прогоняет один запрос через все модели и показывает результат."""
     print()
@@ -487,17 +527,23 @@ def main():
         "--output", "-o",
         type=str,
         default=None,
-        help="Сохранить результаты в JSON-файл",
+        help="Сохранить результаты в указанный файл (по умолчанию: output/ID-тема/)",
     )
     args = parser.parse_args()
 
     device = args.device or detect_device()
 
+    # Определяем цель вывода: явный файл или авто-сохранение в output/
+    output_target = args.output or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "output"
+    )
+
     # Режим: одиночный запрос (без интерактива)
     if args.prompt:
         print(f"  Устройство: {device}")
+        output_file = _resolve_output_file(output_target, args.prompt)
         process_single_query(
-            args.prompt, device, args.max_tokens, args.temperature, args.output
+            args.prompt, device, args.max_tokens, args.temperature, output_file
         )
         return
 
@@ -528,8 +574,9 @@ def main():
         if not query:
             continue
 
+        output_file = _resolve_output_file(output_target, query)
         process_single_query(
-            query, device, args.max_tokens, args.temperature, args.output
+            query, device, args.max_tokens, args.temperature, output_file
         )
 
 
