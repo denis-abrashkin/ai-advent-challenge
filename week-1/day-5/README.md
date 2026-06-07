@@ -2,57 +2,55 @@
 
 ## Задание
 
-Выполните один и тот же запрос на трёх моделях разной мощности из HuggingFace.
+Выполните один и тот же запрос на трёх моделях разной мощности через OpenRouter API.
 
-Модели (семейство Qwen2.5 для единообразия архитектуры):
-| Уровень | Модель | Параметры | Память (fp16) |
-|---------|--------|:---------:|:-------------:|
-| Слабая (Weak) | Qwen2.5-0.5B-Instruct | 0.5B | ~350 MB |
-| Средняя (Medium) | Qwen2.5-1.5B-Instruct | 1.5B | ~1.0 GB |
-| Сильная (Strong) | Qwen2.5-3B-Instruct | 3.0B | ~2.0 GB |
+Модели:
+| Уровень | Модель | Провайдер | Цена (вход/выход за 1M токенов) |
+|---------|--------|-----------|:-------------------------------:|
+| Слабая (Weak) | Gemma 3 4B | Google | $0.04 / $0.08 |
+| Средняя (Medium) | Llama 3.1 8B | Meta | $0.02 / $0.03 |
+| Сильная (Strong) | Gemini 2.5 Flash Lite | Google | $0.10 / $0.40 |
 
 ### Замеры
 - время ответа (сек)
 - количество токенов (входных и выходных)
 - скорость генерации (токенов/c)
+- стоимость ($)
 
 ### Сравнение
 - качество ответов
-- скорость инференса
-- ресурсоёмкость (параметры, память)
+- скорость API
+- цена
 
-## Установка
+## Подготовка
 
-Проект использует виртуальное окружение Python. Зависимости:
+### 1. Получить API ключ OpenRouter
 
+Зарегистрируйтесь на [openrouter.ai](https://openrouter.ai), создайте API ключ в настройках.
+
+### 2. Сохранить ключ
+
+**Вариант А — macOS Keychain (рекомендуется):**
 ```bash
-# Активировать виртуальное окружение
-source .venv/bin/activate
-
-# Установить зависимости (из корня проекта)
-pip install -r requirements.txt
-pip install transformers torch accelerate sentencepiece
+security add-generic-password -s 'openrouter-api-key' -w 'sk-or-v1-...'
 ```
 
-Модели скачиваются из HuggingFace Hub автоматически при первом запуске
-и кешируются в `dev/.huggingface/hub/`.
+**Вариант Б — переменная окружения:**
+```bash
+export OPENROUTER_API_KEY='sk-or-v1-...'
+```
 
-> **ℹ️ Для Apple Silicon (MPS):** `torch` автоматически использует Metal Performance Shaders.
-  Для ускорения загрузки моделей можно установить `HF_TOKEN`:
-  ```bash
-  export HF_TOKEN="ваш_токен"
-  ```
-  Получить токен: https://huggingface.co/settings/tokens
+### 3. Активировать окружение
 
-> **ℹ️** `__pycache__` отключён через `PYTHONDONTWRITEBYTECODE=1` в `.venv/bin/activate`.
+```bash
+source .venv/bin/activate
+```
 
 ## Использование
 
-Скрипт работает в **интерактивном режиме** (как day-1 — day-4):
+Скрипт работает в **интерактивном режиме**:
 
 ```bash
-# Активировать окружение и запустить
-source .venv/bin/activate
 python3 week-1/day-5/model_comparison.py
 ```
 
@@ -66,7 +64,7 @@ python3 week-1/day-5/model_comparison.py --prompt "Объясни ML за 30 с�
 ```
 
 Результаты автоматически сохраняются в `week-1/day-5/output/NNN-тема/`:
-- `results.json` — сырые данные
+- `results.json` — сырые данные (токены, время, стоимость)
 - `results.md` — сравнительная таблица и ссылки на модели
 
 Для сохранения в произвольный файл используйте `--output`:
@@ -80,13 +78,13 @@ python3 week-1/day-5/model_comparison.py --prompt "Что такое тензо�
 | Параметр | Описание | По умолчанию |
 |---|---|---|
 | `--prompt, -p` | Одиночный запрос (без интерактива) | (интерактив) |
-| `--device, -d` | Устройство: cpu, mps, cuda | автоопределение |
 | `--max-tokens` | Макс. токенов на ответ | 256 |
 | `--temperature, -t` | Температура семплинга | 0.7 |
 | `--output, -o` | Сохранить в указанный файл (по умолч. авто-сохранение в `output/`) | авто `output/ID-тема/` |
 
 ## Ссылки
 
-- [Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)
-- [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct)
-- [Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct)
+- [Gemma 3 4B](https://openrouter.ai/models/google/gemma-3-4b-it)
+- [Llama 3.1 8B](https://openrouter.ai/models/meta-llama/llama-3.1-8b-instruct)
+- [Gemini 2.5 Flash Lite](https://openrouter.ai/models/google/gemini-2.5-flash-lite)
+- [OpenRouter](https://openrouter.ai)

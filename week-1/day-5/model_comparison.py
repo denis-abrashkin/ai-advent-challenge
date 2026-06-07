@@ -1,72 +1,65 @@
 """
 День 5. Версии моделей — сравнение weak, medium, strong моделей
 ================================================================
-Запускает один и тот же промпт на трёх моделях из HuggingFace,
-замеряет время ответа, количество токенов, стоимость (если API),
-сравнивает качество ответов, скорость и ресурсоёмкость.
+Запускает один и тот же промпт на трёх облачных моделях через
+OpenRouter API, замеряет время ответа, количество токенов, стоимость,
+сравнивает качество ответов, скорость и цену.
 
-Модели (семейство Qwen2.5 — одинаковый токенизатор и архитектура):
-  - Слабая:   Qwen/Qwen2.5-0.5B-Instruct  (0.5B,  ~350 MB в fp16)
-  - Средняя:  Qwen/Qwen2.5-1.5B-Instruct  (1.5B,  ~1.0 GB в fp16)
-  - Сильная:  Qwen/Qwen2.5-3B-Instruct    (3B,    ~2.0 GB в fp16)
+Модели:
+  - Слабая:   google/gemma-3-4b-it                ($0.04 / $0.08 за 1M токенов)
+  - Средняя:  meta-llama/llama-3.1-8b-instruct     ($0.02 / $0.03 за 1M токенов)
+  - Сильная:  google/gemini-2.5-flash-lite         ($0.10 / $0.40 за 1M токенов)
 
-При недоступности MPS использует CPU.
-При недостатке памяти для 7B использует 4-битную квантизацию.
+API ключ читается из macOS Keychain (openrouter-api-key) или
+переменной окружения OPENROUTER_API_KEY.
 """
 
 import argparse
-import contextlib
-import gc
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, asdict
 from typing import Optional
 
-# ── Try imports ──────────────────────────────────────────────────────────────────
+# ── OpenRouter API ──────────────────────────────────────────────────────────────
 
-try:
-    import torch
-    from transformers import (
-        AutoModelForCausalLM,
-        AutoTokenizer,
-    )
-except ImportError as e:
-    sys.exit(
-        f"Ошибка импорта: {e}\n"
-        "Установите зависимости:\n"
-        "  pip install transformers torch accelerate sentencepiece"
-    )
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # ── Config ───────────────────────────────────────────────────────────────────────
 
 MODELS = [
     {
-        "name": "Qwen/Qwen2.5-0.5B-Instruct",
-        "label": "Слабая (Weak, 0.5B)",
+        "name": "google/gemma-3-4b-it",
+        "label": "Слабая (Gemma 3 4B)",
         "tier": "weak",
-        "params_b": 0.5,
+        "provider": "Google",
+        "price_per_m_input": 0.04,
+        "price_per_m_output": 0.08,
     },
     {
-        "name": "Qwen/Qwen2.5-1.5B-Instruct",
-        "label": "Средняя (Medium, 1.5B)",
+        "name": "meta-llama/llama-3.1-8b-instruct",
+        "label": "Средняя (Llama 3.1 8B)",
         "tier": "medium",
-        "params_b": 1.5,
+        "provider": "Meta",
+        "price_per_m_input": 0.02,
+        "price_per_m_output": 0.03,
     },
     {
-        "name": "Qwen/Qwen2.5-3B-Instruct",
-        "label": "Сильная (Strong, 3B)",
+        "name": "google/gemini-2.5-flash-lite",
+        "label": "Сильная (Gemini 2.5 Flash Lite)",
         "tier": "strong",
-        "params_b": 3.0,
+        "provider": "Google",
+        "price_per_m_input": 0.10,
+        "price_per_m_output": 0.40,
     },
 ]
 
-# Ссылки на модели в HuggingFace
 MODEL_LINKS = {
-    model["name"]: f"https://huggingface.co/{model['name']}"
-    for model in MODELS
+    m["name"]: f"https://openrouter.ai/models/{m['name']}"
+    for m in MODELS
 }
 
 # Системный промпт (без эмодзи, как требует задание)
@@ -84,129 +77,258 @@ class ModelResult:  # pylint: disable=too-many-instance-attributes
     model_name: str
     model_label: str
     model_tier: str
-    params_b: float
+    provider: str
     prompt: str
     response: str
-    device: str
     duration_seconds: float
     tokens_input: int = 0
     tokens_output: int = 0
     tokens_per_second: float = 0.0
+    cost_usd: float = 0.0
     error: Optional[str] = None
-    quantization: str = "none"
 
 
-# ── Device detection ─────────────────────────────────────────────────────────────
+# ── API key ──────────────────────────────────────────────────────────────────────
 
 
-def detect_device() -> str:
-    """Определяет лучшее доступное устройство."""
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
-
-
-# ── Model loading ────────────────────────────────────────────────────────────────
-
-
-@contextlib.contextmanager
-def managed_model(model_id: str, device: str):
-    """
-    Загружает модель и токенизатор, гарантированно выгружая их при выходе.
-    Для 7B модели использует fp16 на MPS/cuda для экономии памяти.
-    """
-    model = None
-    tokenizer = None
-    quantization = "none"
+def _get_api_key() -> str:
+    """Читает OpenRouter API key из macOS Keychain или переменной окружения."""
+    # Пробуем macOS Keychain
     try:
-        print(f"  [Загрузка] {model_id}...", end=" ", flush=True)
-        t0 = time.time()
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_id, trust_remote_code=True, token=True
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "openrouter-api-key", "-w"],
+            capture_output=True, text=True, check=True,
         )
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+        key = result.stdout.strip()
+        if key:
+            return key
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
 
-        # Определяем dtype и устройство
-        load_kwargs = {
-            "trust_remote_code": True,
-            "token": True,
-        }
+    # Fallback: переменная окружения
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if key:
+        return key
 
-        if device in ("mps", "cuda"):
-            load_kwargs["dtype"] = torch.float16
-            quantization = "fp16"
-        else:
-            load_kwargs["dtype"] = torch.float32
-            quantization = "fp32"
-
-        model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
-        model.eval()
-
-        # Явно перемещаем модель на нужное устройство
-        if device in ("mps", "cuda"):
-            model = model.to(device)
-
-        elapsed = time.time() - t0
-        print(f"готово ({elapsed:.1f}с, {quantization})")
-        yield model, tokenizer, quantization
-
-    finally:
-        del model
-        del tokenizer
-        gc.collect()
-        if device == "mps":
-            with contextlib.suppress(RuntimeError):
-                torch.mps.empty_cache()
-
-
-# ── Inference ────────────────────────────────────────────────────────────────────
-
-
-def run_inference(
-    model,
-    tokenizer,
-    prompt: str,
-    max_new_tokens: int = 256,
-    temperature: float = 0.7,
-) -> tuple[str, int, int]:
-    """
-    Выполняет инференс модели на заданном промпте.
-    Возвращает (текст ответа, количество входных токенов, количество выходных токенов).
-    """
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": prompt},
-    ]
-
-    # Применяем chat template
-    formatted = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
+    sys.exit(
+        "❌ API ключ OpenRouter не найден.\n\n"
+        "Сохраните ключ в macOS Keychain:\n"
+        "  security add-generic-password -s 'openrouter-api-key' -w 'sk-or-v1-...'\n\n"
+        "Или установите переменную окружения:\n"
+        "  export OPENROUTER_API_KEY='sk-or-v1-...'"
     )
 
-    inputs = tokenizer(formatted, return_tensors="pt").to(model.device)
-    input_len = inputs["input_ids"].shape[1]
 
-    with torch.inference_mode():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            do_sample=True,
-            top_p=0.9,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
+def _get_openrouter_client():
+    """Создаёт OpenAI-совместимый клиент для OpenRouter."""
+    # Импортируем здесь для мягкого fallback
+    try:
+        from openai import OpenAI
+    except ImportError as e:
+        sys.exit(
+            f"Ошибка импорта: {e}\n"
+            "Установите openai:\n"
+            "  pip install openai"
         )
 
-    output_len = outputs.shape[1] - input_len
-    response = tokenizer.decode(
-        outputs[0][input_len:], skip_special_tokens=True
-    ).strip()
+    api_key = _get_api_key()
+    return OpenAI(
+        base_url=OPENROUTER_BASE_URL,
+        api_key=api_key,
+        default_headers={
+            "HTTP-Referer": "https://github.com/hyperion-vision/ai-advent-challenge",
+            "X-Title": "AI Advent - Day 5 Model Comparison",
+        },
+    )
 
-    return response, input_len, output_len
+
+# ── Cost calculation ─────────────────────────────────────────────────────────────
+
+
+def _calculate_cost(price_in, price_out, tokens_in, tokens_out) -> float:
+    """Считает стоимость запроса в USD."""
+    return (tokens_in / 1_000_000) * price_in + (tokens_out / 1_000_000) * price_out
+
+
+# ── API call ─────────────────────────────────────────────────────────────────────
+
+
+def call_model(
+    client, model_id: str, prompt: str,
+    max_tokens: Optional[int] = None, temperature: float = 0.7,
+) -> tuple[str, int, int]:
+    """
+    Вызывает модель через OpenRouter API.
+    max_tokens=None означает без ограничения длины ответа.
+    Возвращает (текст ответа, входные токены, выходные токены).
+    """
+    kwargs = {
+        "model": model_id,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": temperature,
+    }
+    if max_tokens is not None and max_tokens > 0:
+        kwargs["max_tokens"] = max_tokens
+
+    completion = client.chat.completions.create(**kwargs)
+    response = completion.choices[0].message.content.strip() if completion.choices else ""
+    usage = completion.usage
+    return response, usage.prompt_tokens, usage.completion_tokens
+
+
+# ── Judge ───────────────────────────────────────────────────────────────────────
+
+JUDGE_MODEL = "google/gemini-2.5-flash-lite"
+JUDGE_SYSTEM_PROMPT = (
+    "You are an impartial AI judge evaluating responses from different language models. "
+    "Assess each response critically and be fair. "
+    "Return ALL text fields (strengths, weaknesses, summary, winner_reasoning) in Russian. "
+    "Always return valid JSON."
+)
+
+
+@dataclass
+class JudgeVerdict:
+    """Вердикт судьи по одной модели."""
+    model_name: str
+    model_label: str
+    scores: dict  # {"accuracy": 8, "completeness": 7, ...}
+    total: float
+    strengths: list[str]
+    weaknesses: list[str]
+    summary: str
+
+
+def _build_judge_prompt(query: str, all_results: list) -> str:
+    """Формирует промпт для судьи со всеми ответами моделей."""
+    parts = [
+        f'Исходный запрос пользователя: "{query}"\n',
+        "Ниже приведены ответы трёх разных AI-моделей на один и тот же запрос. ",
+        "Оцени каждый ответ по следующим критериям (оценка 1-10):\n",
+        "1. **accuracy** — точность: насколько ответ фактологически корректен\n",
+        "2. **completeness** — полнота: насколько глубоко раскрыта тема\n",
+        "3. **clarity** — ясность: структурированность, читаемость, понятность\n",
+        "4. **conciseness** — лаконичность: информативность без лишней воды\n\n",
+        'Верни JSON-объект строго по этой схеме (без markdown-обёртки):\n',
+        "{\n",
+        '  "evaluations": [\n',
+        "    {\n",
+        '      "model": "model-id",\n',
+        '      "label": "Model Label",\n',
+        '      "scores": {"accuracy": 0, "completeness": 0, "clarity": 0, "conciseness": 0},\n',
+        '      "overall": 0.0,\n',
+        '      "strengths": ["сильная сторона на русском"],\n',
+        '      "weaknesses": ["слабая сторона на русском"],\n',
+        '      "summary": "вердикт одной строкой на русском"\n',
+        "    }\n",
+        "  ],\n",
+        '  "winner": "best-model-id",\n',
+        '  "winner_reasoning": "почему эта модель лучше — на русском"\n',
+        "}\n",
+        "\nВАЖНО: Все текстовые поля (strengths, weaknesses, summary, winner_reasoning) "
+        "пиши ТОЛЬКО на РУССКОМ языке.\n",
+        "\n--- ОТВЕТЫ МОДЕЛЕЙ ---\n",
+    ]
+    for r in all_results:
+        if r.error:
+            continue
+        parts.append(f"\n### {r.model_label} ({r.model_name})\n{'-' * 40}\n")
+        parts.append(r.response)
+        parts.append("\n")
+    return "\n".join(parts)
+
+
+def _judge_responses(client, query: str, all_results: list) -> Optional[dict]:
+    """Оценивает ответы всех моделей через LLM-судью."""
+    successful = [r for r in all_results if not r.error]
+    if len(successful) < 2:
+        return None
+
+    prompt = _build_judge_prompt(query, successful)
+
+    for attempt in range(2):
+        kwargs = {
+            "model": JUDGE_MODEL,
+            "messages": [
+                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 1024,
+            "temperature": 0.0,
+        }
+        if attempt == 0:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        try:
+            completion = client.chat.completions.create(**kwargs)
+            text = completion.choices[0].message.content.strip()
+        except Exception:  # pylint: disable=broad-except
+            continue
+
+        # Strip optional markdown code fence
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            text = m.group(0)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+
+        verdicts = []
+        for ev in data.get("evaluations", []):
+            scores = ev.get("scores", {})
+            vals = [scores.get(k, 0) for k in ("accuracy", "completeness", "clarity", "conciseness")]
+            total = sum(vals) / len(vals) if vals else 0.0
+            verdicts.append(JudgeVerdict(
+                model_name=ev.get("model", ""),
+                model_label=ev.get("label", ev.get("model", "")),
+                scores=scores,
+                total=total,
+                strengths=ev.get("strengths", []),
+                weaknesses=ev.get("weaknesses", []),
+                summary=ev.get("summary", ""),
+            ))
+
+        return {
+            "verdicts": verdicts,
+            "winner": data.get("winner", ""),
+            "winner_reasoning": data.get("winner_reasoning", ""),
+        }
+
+    return None
+
+
+def show_judge_results(judge_data: dict):
+    """Показывает результаты оценки судьи в консоли."""
+    if not judge_data:
+        return
+    verdicts = judge_data["verdicts"]
+
+    col_width = 14
+    parts = "  Критерий".ljust(20)
+    for v in verdicts:
+        parts += v.model_label.split("(")[0].strip().rjust(col_width)
+    print(parts)
+    print("  " + "─" * 20 + " " + " ".join("─" * col_width for _ in verdicts))
+
+    for criterion, label in (("accuracy", "Точность"), ("completeness", "Полнота"),
+                              ("clarity", "Ясность"), ("conciseness", "Лаконичность")):
+        parts = f"  {label}".ljust(20)
+        for v in verdicts:
+            parts += str(v.scores.get(criterion, "—")).rjust(col_width)
+        print(parts)
+
+    parts = "  Общий балл".ljust(20)
+    for v in verdicts:
+        parts += f"{v.total:.1f}".rjust(col_width)
+    print(parts)
+
+    if judge_data.get("winner"):
+        print(f"\n  🏆 Победитель: {judge_data['winner_reasoning']}")
+    print()
 
 
 # ── Вывод в консоль (русский, интерактивный) ────────────────────────────────────
@@ -243,7 +365,7 @@ def show_model_responses(all_results):
             continue
         r = matches[0]
 
-        print(f"┌─ {model_cfg['label']} ({model_cfg['params_b']}B)")
+        print(f"┌─ {model_cfg['label']} ({model_cfg['provider']})")
         if r.error:
             print(f"│  [ОШИБКА] {r.error}")
         else:
@@ -255,12 +377,12 @@ def show_model_responses(all_results):
 
 def show_metrics_table(all_results):
     """Сводная таблица метрик по всем моделям."""
-    col_width = 16
+    col_width = 20
 
     # Заголовок
     parts = "  Параметр".ljust(22)
     for mc in MODELS:
-        parts += f"{mc['params_b']}B".rjust(col_width)
+        parts += mc["name"].rsplit("/", 1)[-1].rjust(col_width)
     print(parts)
     print("  " + "─" * 22 + " " + " ".join("─" * col_width for _ in MODELS))
 
@@ -274,7 +396,17 @@ def show_metrics_table(all_results):
             parts += "—".rjust(col_width)
     print(parts)
 
-    # Токены
+    # Входные токены
+    parts = "  Входных токенов".ljust(22)
+    for mc in MODELS:
+        matches = [r for r in all_results if r.model_name == mc["name"]]
+        if matches and not matches[0].error:
+            parts += str(matches[0].tokens_input).rjust(col_width)
+        else:
+            parts += "—".rjust(col_width)
+    print(parts)
+
+    # Выходные токены
     parts = "  Выходных токенов".ljust(22)
     for mc in MODELS:
         matches = [r for r in all_results if r.model_name == mc["name"]]
@@ -290,6 +422,20 @@ def show_metrics_table(all_results):
         matches = [r for r in all_results if r.model_name == mc["name"]]
         if matches and not matches[0].error:
             parts += f"{matches[0].tokens_per_second:.1f}".rjust(col_width)
+        else:
+            parts += "—".rjust(col_width)
+    print(parts)
+
+    # Стоимость
+    parts = "  Стоимость ($)".ljust(22)
+    for mc in MODELS:
+        matches = [r for r in all_results if r.model_name == mc["name"]]
+        if matches and not matches[0].error:
+            cost = matches[0].cost_usd
+            if cost < 0.0001:
+                parts += "< 0.0001".rjust(col_width)
+            else:
+                parts += f"{cost:.6f}".rjust(col_width)
         else:
             parts += "—".rjust(col_width)
     print(parts)
@@ -323,16 +469,16 @@ def _result_for_model(results, model_name):
     return None
 
 
-def _save_markdown_report(output_file, results, extra):
+def _save_markdown_report(output_file, results, extra, judge_data=None):
     """Сохраняет сравнительный отчёт в Markdown-файл."""
     if not output_file:
         return
     report_path = output_file.rsplit(".", 1)[0] + ".md"
 
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("# Сравнение моделей Qwen2.5\n\n")
+        f.write("# Сравнение моделей через OpenRouter\n\n")
         f.write("## Параметры запуска\n\n")
-        f.write(f"- **Устройство:** {extra.get('device', '—')}\n")
+        f.write("- **Провайдер:** OpenRouter API\n")
         f.write(f"- **Температура:** {extra.get('temperature', '—')}\n")
         f.write(f"- **Макс. токенов:** {extra.get('max_tokens', '—')}\n")
         if extra.get("prompt"):
@@ -343,25 +489,24 @@ def _save_markdown_report(output_file, results, extra):
         # Header
         f.write("| Метрика |")
         for mc in MODELS:
-            f.write(f" {mc['params_b']}B |")
+            short = mc["name"].rsplit("/", 1)[-1]
+            f.write(f" {short} |")
         f.write("\n|")
         f.write("---------|")
         for _ in MODELS:
             f.write(":----:|")
         f.write("\n")
 
-        # Все строки таблицы — ресурсы, скорость, качество
+        # Все строки таблицы
         for label, cell_fn in (
-            # ── Ресурсоёмкость ──
-            ("Параметры (B)", lambda mc, _r: f"{mc['params_b']:.1f}"),
-            ("Квантизация", lambda _mc, r: r.quantization),
-            ("Память (GB) ≈", lambda mc, _r: f"{mc['params_b'] * 2:.1f}"),
-            # ── Скорость ──
+            ("Провайдер", lambda mc, _r: mc["provider"]),
             ("Время (с)", lambda _mc, r: f"{r.duration_seconds:.1f}"),
             ("Скорость (ток/с)", lambda _mc, r: f"{r.tokens_per_second:.1f}"),
-            # ── Качество (прокси) ──
             ("Входных токенов", lambda _mc, r: str(r.tokens_input)),
             ("Выходных токенов", lambda _mc, r: str(r.tokens_output)),
+            ("Стоимость ($)", lambda _mc, r: (
+                "< 0.0001" if r.cost_usd < 0.0001 else f"{r.cost_usd:.6f}"
+            )),
         ):
             f.write(f"| {label} |")
             for mc in MODELS:
@@ -373,6 +518,54 @@ def _save_markdown_report(output_file, results, extra):
             f.write("\n")
 
         f.write("\n")
+        f.write("## Цены моделей\n\n")
+        f.write("| Модель | Вход ($/1M токенов) | Выход ($/1M токенов) |\n")
+        f.write("|-------|:------------------:|:-------------------:|\n")
+        for mc in MODELS:
+            short = mc["name"].rsplit("/", 1)[-1]
+            pin = f"{mc['price_per_m_input']:.2f}" if mc['price_per_m_input'] > 0 else "free"
+            pout = f"{mc['price_per_m_output']:.2f}" if mc['price_per_m_output'] > 0 else "free"
+            f.write(f"| {short} | {pin} | {pout} |\n")
+        f.write("\n")
+
+        # ── Judge section ───────────────────────────────────────────────────────
+        if judge_data and judge_data.get("verdicts"):
+            f.write("## Оценка судьи (LLM-as-a-Judge)\n\n")
+            f.write(f"Модель-судья: `{extra.get('judge', {}).get('model', JUDGE_MODEL)}`\n\n")
+
+            f.write("| Модель | Точность | Полнота | Ясность | Лаконичность | **Общий балл** |\n")
+            f.write("|-------|:--------:|:-------:|:-------:|:------------:|:--------------:|\n")
+            for v in judge_data["verdicts"]:
+                short = v.model_name.rsplit("/", 1)[-1]
+                s = v.scores
+                f.write(
+                    f"| {short} | {s.get('accuracy', '—')} "
+                    f"| {s.get('completeness', '—')} "
+                    f"| {s.get('clarity', '—')} "
+                    f"| {s.get('conciseness', '—')} "
+                    f"| **{v.total:.1f}** |\n"
+                )
+            f.write("\n")
+
+            f.write("### Сильные и слабые стороны\n\n")
+            for v in judge_data["verdicts"]:
+                short = v.model_name.rsplit("/", 1)[-1]
+                f.write(f"**{short}** ({v.total:.1f}/10)\n\n")
+                if v.strengths:
+                    f.write("✅ Сильные стороны:\n")
+                    for s in v.strengths:
+                        f.write(f"- {s}\n")
+                if v.weaknesses:
+                    f.write("❌ Слабые стороны:\n")
+                    for s in v.weaknesses:
+                        f.write(f"- {s}\n")
+                f.write(f"\n*{v.summary}*\n\n")
+
+            if judge_data.get("winner"):
+                f.write("### Победитель\n\n")
+                f.write(f"**{judge_data['winner']}**\n\n")
+                f.write(f"{judge_data['winner_reasoning']}\n\n")
+
         f.write("## Ссылки на модели\n\n")
         for mc in MODELS:
             url = MODEL_LINKS.get(mc["name"], "")
@@ -421,83 +614,98 @@ def _resolve_output_file(output_target, query):
     return os.path.join(run_dir, "results.json")
 
 
-def process_single_query(query, device, max_tokens, temperature, output_file):  # pylint: disable=too-many-locals
+def process_single_query(query, max_tokens, temperature, output_file):  # pylint: disable=too-many-locals
     """Прогоняет один запрос через все модели и показывает результат."""
     print()
     print_progress(f"Запрос: {query[:80]}")
     print()
 
+    client = _get_openrouter_client()
+
     all_results = []
     for model_cfg in MODELS:
-        with managed_model(model_cfg["name"], device) as (model, tokenizer, quant):
-            if model is None:
-                all_results.append(ModelResult(
-                    model_name=model_cfg["name"],
-                    model_label=model_cfg["label"],
-                    model_tier=model_cfg["tier"],
-                    params_b=model_cfg["params_b"],
-                    prompt=query,
-                    response="",
-                    device=device,
-                    duration_seconds=0.0,
-                    error="Ошибка загрузки модели",
-                    quantization=quant,
-                ))
-                continue
+        print(f"  [Запрос] {model_cfg['label']}...", end=" ", flush=True)
+        t0 = time.time()
+        try:
+            response, inp_len, out_len = call_model(
+                client, model_cfg["name"], query,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            elapsed = time.time() - t0
+            tok_per_sec = out_len / elapsed if elapsed > 0 else 0.0
+            cost = _calculate_cost(
+                model_cfg["price_per_m_input"],
+                model_cfg["price_per_m_output"],
+                inp_len,
+                out_len,
+            )
 
-            t0 = time.time()
-            try:
-                response, inp_len, out_len = run_inference(
-                    model, tokenizer, query,
-                    max_new_tokens=max_tokens,
-                    temperature=temperature,
-                )
-                elapsed = time.time() - t0
-                tok_per_sec = out_len / elapsed if elapsed > 0 else 0.0
+            all_results.append(ModelResult(
+                model_name=model_cfg["name"],
+                model_label=model_cfg["label"],
+                model_tier=model_cfg["tier"],
+                provider=model_cfg["provider"],
+                prompt=query,
+                response=response,
+                duration_seconds=elapsed,
+                tokens_input=inp_len,
+                tokens_output=out_len,
+                tokens_per_second=tok_per_sec,
+                cost_usd=cost,
+            ))
 
-                all_results.append(ModelResult(
-                    model_name=model_cfg["name"],
-                    model_label=model_cfg["label"],
-                    model_tier=model_cfg["tier"],
-                    params_b=model_cfg["params_b"],
-                    prompt=query,
-                    response=response,
-                    device=device,
-                    duration_seconds=elapsed,
-                    tokens_input=inp_len,
-                    tokens_output=out_len,
-                    tokens_per_second=tok_per_sec,
-                    quantization=quant,
-                ))
-                print(f"  ✅ {model_cfg['label']}: {out_len} токенов, "
-                      f"{elapsed:.1f}с ({tok_per_sec:.1f} ток/с)")
-            except (RuntimeError, ValueError, OSError) as e:
-                elapsed = time.time() - t0
-                all_results.append(ModelResult(
-                    model_name=model_cfg["name"],
-                    model_label=model_cfg["label"],
-                    model_tier=model_cfg["tier"],
-                    params_b=model_cfg["params_b"],
-                    prompt=query,
-                    response="",
-                    device=device,
-                    duration_seconds=elapsed,
-                    error=str(e),
-                    quantization=quant,
-                ))
-                print(f"  ❌ {model_cfg['label']}: ОШИБКА — {e}")
+            if cost < 0.0001:
+                cost_str = "бесплатно"
+            else:
+                cost_str = f"${cost:.6f}"
+            print(f"✅ {out_len} токенов, {elapsed:.1f}с ({tok_per_sec:.1f} ток/с), {cost_str}")
+
+        except Exception as e:  # pylint: disable=broad-except
+            elapsed = time.time() - t0
+            all_results.append(ModelResult(
+                model_name=model_cfg["name"],
+                model_label=model_cfg["label"],
+                model_tier=model_cfg["tier"],
+                provider=model_cfg["provider"],
+                prompt=query,
+                response="",
+                duration_seconds=elapsed,
+                error=str(e),
+            ))
+            print(f"❌ ОШИБКА — {e}")
 
     print()
     extra = {
-        "device": device, "prompt": query,
-        "max_tokens": max_tokens, "temperature": temperature,
+        "provider": "OpenRouter",
+        "prompt": query,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
     }
+
+    # ── Оценка судьи ────────────────────────────────────────────────────────────
+    judge_data = None
+    successful = [r for r in all_results if not r.error]
+    if len(successful) >= 2:
+        print_progress("Оценка ответов судьёй (LLM-as-a-Judge)")
+        judge_data = _judge_responses(client, query, all_results)
+        if judge_data:
+            extra["judge"] = {
+                "model": JUDGE_MODEL,
+                "winner": judge_data["winner"],
+                "winner_reasoning": judge_data["winner_reasoning"],
+                "verdicts": [asdict(v) for v in judge_data["verdicts"]],
+            }
+
     _save_results_json(output_file, all_results, extra)
-    _save_markdown_report(output_file, all_results, extra)
+    _save_markdown_report(output_file, all_results, extra, judge_data)
     print_header("Ответы моделей")
     show_model_responses(all_results)
     print_header("Сравнение метрик")
     show_metrics_table(all_results)
+    if judge_data:
+        print_header("Оценка судьи (LLM-as-a-Judge)")
+        show_judge_results(judge_data)
     print()
 
 
@@ -507,7 +715,7 @@ def process_single_query(query, device, max_tokens, temperature, output_file):  
 def main():
     """Точка входа: интерактивный режим или разовый запрос."""
     parser = argparse.ArgumentParser(
-        description="День 5: Сравнение слабой / средней / сильной модели HuggingFace"
+        description="День 5: Сравнение слабой / средней / сильной модели через OpenRouter API"
     )
     parser.add_argument(
         "--prompt", "-p",
@@ -515,16 +723,10 @@ def main():
         help="Одиночный запрос (без интерактивного режима)",
     )
     parser.add_argument(
-        "--device", "-d",
-        type=str,
-        default=None,
-        help="Устройство: cpu, mps, cuda",
-    )
-    parser.add_argument(
         "--max-tokens",
         type=int,
-        default=256,
-        help="Максимум токенов в ответе (по умолчанию: 256)",
+        default=0,
+        help="Максимум токенов в ответе (0 = без ограничения)",
     )
     parser.add_argument(
         "--temperature", "-t",
@@ -540,8 +742,6 @@ def main():
     )
     args = parser.parse_args()
 
-    device = args.device or detect_device()
-
     # Определяем цель вывода: явный файл или авто-сохранение в output/
     output_target = args.output or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "output"
@@ -549,10 +749,9 @@ def main():
 
     # Режим: одиночный запрос (без интерактива)
     if args.prompt:
-        print(f"  Устройство: {device}")
         output_file = _resolve_output_file(output_target, args.prompt)
         process_single_query(
-            args.prompt, device, args.max_tokens, args.temperature, output_file
+            args.prompt, args.max_tokens, args.temperature, output_file
         )
         return
 
@@ -562,10 +761,11 @@ def main():
     print("  День 5: Версии моделей — сравнение слабой / средней / сильной")
     print("=" * (BOX_WIDTH + 2))
     print()
-    print(f"  Устройство: {device.upper()}")
+    print("  Провайдер: OpenRouter API")
     print("  Модели:")
     for mc in MODELS:
-        print(f"    • {mc['label']} ({mc['params_b']}B) — {mc['name']}")
+        price = f"${mc['price_per_m_input']:.2f}" if mc['price_per_m_input'] > 0 else "free"
+        print(f"    • {mc['label']} — {mc['name']} ({price}/1M in)")
     print()
     print("  Введи 'exit' или 'quit' для выхода.")
     print()
@@ -585,7 +785,7 @@ def main():
 
         output_file = _resolve_output_file(output_target, query)
         process_single_query(
-            query, device, args.max_tokens, args.temperature, output_file
+            query, args.max_tokens, args.temperature, output_file
         )
 
 
