@@ -155,21 +155,25 @@ def _calculate_cost(price_in, price_out, tokens_in, tokens_out) -> float:
 
 def call_model(
     client, model_id: str, prompt: str,
-    max_tokens: int = 256, temperature: float = 0.7,
+    max_tokens: Optional[int] = None, temperature: float = 0.7,
 ) -> tuple[str, int, int]:
     """
     Вызывает модель через OpenRouter API.
+    max_tokens=None означает без ограничения длины ответа.
     Возвращает (текст ответа, входные токены, выходные токены).
     """
-    completion = client.chat.completions.create(
-        model=model_id,
-        messages=[
+    kwargs = {
+        "model": model_id,
+        "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
+        "temperature": temperature,
+    }
+    if max_tokens is not None and max_tokens > 0:
+        kwargs["max_tokens"] = max_tokens
+
+    completion = client.chat.completions.create(**kwargs)
     response = completion.choices[0].message.content.strip() if completion.choices else ""
     usage = completion.usage
     return response, usage.prompt_tokens, usage.completion_tokens
@@ -721,8 +725,8 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=256,
-        help="Максимум токенов в ответе (по умолчанию: 256)",
+        default=0,
+        help="Максимум токенов в ответе (0 = без ограничения)",
     )
     parser.add_argument(
         "--temperature", "-t",
