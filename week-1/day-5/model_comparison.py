@@ -175,6 +175,153 @@ def call_model(
     return response, usage.prompt_tokens, usage.completion_tokens
 
 
+# ── Judge ───────────────────────────────────────────────────────────────────────
+
+JUDGE_MODEL = "google/gemini-2.5-flash-lite"
+JUDGE_SYSTEM_PROMPT = (
+    "You are an impartial AI judge evaluating responses from different language models. "
+    "Assess each response critically and be fair. Always return valid JSON."
+)
+
+
+@dataclass
+class JudgeVerdict:
+    """Вердикт судьи по одной модели."""
+    model_name: str
+    model_label: str
+    scores: dict  # {"accuracy": 8, "completeness": 7, ...}
+    total: float
+    strengths: list[str]
+    weaknesses: list[str]
+    summary: str
+
+
+def _build_judge_prompt(query: str, all_results: list) -> str:
+    """Формирует промпт для судьи со всеми ответами моделей."""
+    parts = [
+        f'Original user prompt: "{query}"\n',
+        "Below are responses from three different AI models to the same prompt. "
+        "Evaluate each on these criteria (score 1-10):\n",
+        "1. **accuracy** — factual correctness and precision\n",
+        "2. **completeness** — how thoroughly the topic is covered\n",
+        "3. **clarity** — structure, readability, ease of understanding\n",
+        "4. **conciseness** — information density without fluff\n\n",
+        'Return a JSON object with this exact schema (no markdown wrapping):\n',
+        "{\n",
+        '  "evaluations": [\n',
+        "    {\n",
+        '      "model": "model-id",\n',
+        '      "label": "Model Label",\n',
+        '      "scores": {"accuracy": 0, "completeness": 0, "clarity": 0, "conciseness": 0},\n',
+        '      "overall": 0.0,\n',
+        '      "strengths": ["..."],\n',
+        '      "weaknesses": ["..."],\n',
+        '      "summary": "one-line verdict"\n',
+        "    }\n",
+        "  ],\n",
+        '  "winner": "best-model-id",\n',
+        '  "winner_reasoning": "why this model performed best"\n',
+        "}\n",
+        "\n--- RESPONSES ---\n",
+    ]
+    for r in all_results:
+        if r.error:
+            continue
+        parts.append(f"\n### {r.model_label} ({r.model_name})\n{'-' * 40}\n")
+        parts.append(r.response)
+        parts.append("\n")
+    return "\n".join(parts)
+
+
+def _judge_responses(client, query: str, all_results: list) -> Optional[dict]:
+    """Оценивает ответы всех моделей через LLM-судью."""
+    successful = [r for r in all_results if not r.error]
+    if len(successful) < 2:
+        return None
+
+    prompt = _build_judge_prompt(query, successful)
+
+    for attempt in range(2):
+        kwargs = {
+            "model": JUDGE_MODEL,
+            "messages": [
+                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 1024,
+            "temperature": 0.0,
+        }
+        if attempt == 0:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        try:
+            completion = client.chat.completions.create(**kwargs)
+            text = completion.choices[0].message.content.strip()
+        except Exception:  # pylint: disable=broad-except
+            continue
+
+        # Strip optional markdown code fence
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            text = m.group(0)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+
+        verdicts = []
+        for ev in data.get("evaluations", []):
+            scores = ev.get("scores", {})
+            vals = [scores.get(k, 0) for k in ("accuracy", "completeness", "clarity", "conciseness")]
+            total = sum(vals) / len(vals) if vals else 0.0
+            verdicts.append(JudgeVerdict(
+                model_name=ev.get("model", ""),
+                model_label=ev.get("label", ev.get("model", "")),
+                scores=scores,
+                total=total,
+                strengths=ev.get("strengths", []),
+                weaknesses=ev.get("weaknesses", []),
+                summary=ev.get("summary", ""),
+            ))
+
+        return {
+            "verdicts": verdicts,
+            "winner": data.get("winner", ""),
+            "winner_reasoning": data.get("winner_reasoning", ""),
+        }
+
+    return None
+
+
+def show_judge_results(judge_data: dict):
+    """Показывает результаты оценки судьи в консоли."""
+    if not judge_data:
+        return
+    verdicts = judge_data["verdicts"]
+
+    col_width = 14
+    parts = "  Критерий".ljust(20)
+    for v in verdicts:
+        parts += v.model_label.split("(")[0].strip().rjust(col_width)
+    print(parts)
+    print("  " + "─" * 20 + " " + " ".join("─" * col_width for _ in verdicts))
+
+    for criterion in ("accuracy", "completeness", "clarity", "conciseness"):
+        parts = f"  {criterion.capitalize()}".ljust(20)
+        for v in verdicts:
+            parts += str(v.scores.get(criterion, "—")).rjust(col_width)
+        print(parts)
+
+    parts = "  Общий балл".ljust(20)
+    for v in verdicts:
+        parts += f"{v.total:.1f}".rjust(col_width)
+    print(parts)
+
+    if judge_data.get("winner"):
+        print(f"\n  🏆 Победитель: {judge_data['winner_reasoning']}")
+    print()
+
+
 # ── Вывод в консоль (русский, интерактивный) ────────────────────────────────────
 
 
@@ -313,7 +460,7 @@ def _result_for_model(results, model_name):
     return None
 
 
-def _save_markdown_report(output_file, results, extra):
+def _save_markdown_report(output_file, results, extra, judge_data=None):
     """Сохраняет сравнительный отчёт в Markdown-файл."""
     if not output_file:
         return
@@ -371,6 +518,44 @@ def _save_markdown_report(output_file, results, extra):
             pout = f"{mc['price_per_m_output']:.2f}" if mc['price_per_m_output'] > 0 else "free"
             f.write(f"| {short} | {pin} | {pout} |\n")
         f.write("\n")
+
+        # ── Judge section ───────────────────────────────────────────────────────
+        if judge_data and judge_data.get("verdicts"):
+            f.write("## Оценка судьи (LLM-as-a-Judge)\n\n")
+            f.write(f"Модель-судья: `{extra.get('judge', {}).get('model', JUDGE_MODEL)}`\n\n")
+
+            f.write("| Модель | Точность | Полнота | Ясность | Лаконичность | **Общий балл** |\n")
+            f.write("|-------|:--------:|:-------:|:-------:|:------------:|:--------------:|\n")
+            for v in judge_data["verdicts"]:
+                short = v.model_name.rsplit("/", 1)[-1]
+                s = v.scores
+                f.write(
+                    f"| {short} | {s.get('accuracy', '—')} "
+                    f"| {s.get('completeness', '—')} "
+                    f"| {s.get('clarity', '—')} "
+                    f"| {s.get('conciseness', '—')} "
+                    f"| **{v.total:.1f}** |\n"
+                )
+            f.write("\n")
+
+            f.write("### Сильные и слабые стороны\n\n")
+            for v in judge_data["verdicts"]:
+                short = v.model_name.rsplit("/", 1)[-1]
+                f.write(f"**{short}** ({v.total:.1f}/10)\n\n")
+                if v.strengths:
+                    f.write("✅ Сильные стороны:\n")
+                    for s in v.strengths:
+                        f.write(f"- {s}\n")
+                if v.weaknesses:
+                    f.write("❌ Слабые стороны:\n")
+                    for s in v.weaknesses:
+                        f.write(f"- {s}\n")
+                f.write(f"\n*{v.summary}*\n\n")
+
+            if judge_data.get("winner"):
+                f.write("### Победитель\n\n")
+                f.write(f"**{judge_data['winner']}**\n\n")
+                f.write(f"{judge_data['winner_reasoning']}\n\n")
 
         f.write("## Ссылки на модели\n\n")
         for mc in MODELS:
@@ -488,12 +673,30 @@ def process_single_query(query, max_tokens, temperature, output_file):  # pylint
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
+
+    # ── Оценка судьи ────────────────────────────────────────────────────────────
+    judge_data = None
+    successful = [r for r in all_results if not r.error]
+    if len(successful) >= 2:
+        print_progress("Оценка ответов судьёй (LLM-as-a-Judge)")
+        judge_data = _judge_responses(client, query, all_results)
+        if judge_data:
+            extra["judge"] = {
+                "model": JUDGE_MODEL,
+                "winner": judge_data["winner"],
+                "winner_reasoning": judge_data["winner_reasoning"],
+                "verdicts": [asdict(v) for v in judge_data["verdicts"]],
+            }
+
     _save_results_json(output_file, all_results, extra)
-    _save_markdown_report(output_file, all_results, extra)
+    _save_markdown_report(output_file, all_results, extra, judge_data)
     print_header("Ответы моделей")
     show_model_responses(all_results)
     print_header("Сравнение метрик")
     show_metrics_table(all_results)
+    if judge_data:
+        print_header("Оценка судьи (LLM-as-a-Judge)")
+        show_judge_results(judge_data)
     print()
 
 
