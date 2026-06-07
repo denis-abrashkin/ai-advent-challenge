@@ -180,7 +180,9 @@ def call_model(
 JUDGE_MODEL = "google/gemini-2.5-flash-lite"
 JUDGE_SYSTEM_PROMPT = (
     "You are an impartial AI judge evaluating responses from different language models. "
-    "Assess each response critically and be fair. Always return valid JSON."
+    "Assess each response critically and be fair. "
+    "Return ALL text fields (strengths, weaknesses, summary, winner_reasoning) in Russian. "
+    "Always return valid JSON."
 )
 
 
@@ -199,14 +201,14 @@ class JudgeVerdict:
 def _build_judge_prompt(query: str, all_results: list) -> str:
     """Формирует промпт для судьи со всеми ответами моделей."""
     parts = [
-        f'Original user prompt: "{query}"\n',
-        "Below are responses from three different AI models to the same prompt. "
-        "Evaluate each on these criteria (score 1-10):\n",
-        "1. **accuracy** — factual correctness and precision\n",
-        "2. **completeness** — how thoroughly the topic is covered\n",
-        "3. **clarity** — structure, readability, ease of understanding\n",
-        "4. **conciseness** — information density without fluff\n\n",
-        'Return a JSON object with this exact schema (no markdown wrapping):\n',
+        f'Исходный запрос пользователя: "{query}"\n',
+        "Ниже приведены ответы трёх разных AI-моделей на один и тот же запрос. ",
+        "Оцени каждый ответ по следующим критериям (оценка 1-10):\n",
+        "1. **accuracy** — точность: насколько ответ фактологически корректен\n",
+        "2. **completeness** — полнота: насколько глубоко раскрыта тема\n",
+        "3. **clarity** — ясность: структурированность, читаемость, понятность\n",
+        "4. **conciseness** — лаконичность: информативность без лишней воды\n\n",
+        'Верни JSON-объект строго по этой схеме (без markdown-обёртки):\n',
         "{\n",
         '  "evaluations": [\n',
         "    {\n",
@@ -214,15 +216,17 @@ def _build_judge_prompt(query: str, all_results: list) -> str:
         '      "label": "Model Label",\n',
         '      "scores": {"accuracy": 0, "completeness": 0, "clarity": 0, "conciseness": 0},\n',
         '      "overall": 0.0,\n',
-        '      "strengths": ["..."],\n',
-        '      "weaknesses": ["..."],\n',
-        '      "summary": "one-line verdict"\n',
+        '      "strengths": ["сильная сторона на русском"],\n',
+        '      "weaknesses": ["слабая сторона на русском"],\n',
+        '      "summary": "вердикт одной строкой на русском"\n',
         "    }\n",
         "  ],\n",
         '  "winner": "best-model-id",\n',
-        '  "winner_reasoning": "why this model performed best"\n',
+        '  "winner_reasoning": "почему эта модель лучше — на русском"\n',
         "}\n",
-        "\n--- RESPONSES ---\n",
+        "\nВАЖНО: Все текстовые поля (strengths, weaknesses, summary, winner_reasoning) "
+        "пиши ТОЛЬКО на РУССКОМ языке.\n",
+        "\n--- ОТВЕТЫ МОДЕЛЕЙ ---\n",
     ]
     for r in all_results:
         if r.error:
@@ -306,8 +310,9 @@ def show_judge_results(judge_data: dict):
     print(parts)
     print("  " + "─" * 20 + " " + " ".join("─" * col_width for _ in verdicts))
 
-    for criterion in ("accuracy", "completeness", "clarity", "conciseness"):
-        parts = f"  {criterion.capitalize()}".ljust(20)
+    for criterion, label in (("accuracy", "Точность"), ("completeness", "Полнота"),
+                              ("clarity", "Ясность"), ("conciseness", "Лаконичность")):
+        parts = f"  {label}".ljust(20)
         for v in verdicts:
             parts += str(v.scores.get(criterion, "—")).rjust(col_width)
         print(parts)
